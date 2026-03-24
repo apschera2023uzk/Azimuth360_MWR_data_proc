@@ -40,14 +40,13 @@ def parse_arguments():
         default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
         help="Input NetCDF file which is already resampled to scan frequency."
     )
-    '''
+    # ./derive_angle_and_direction_of_tilt.py --infile /home/aki/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc
     parser.add_argument(
-        "--outfile", "-o",
+        "--rttov", "-rt",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
-        help="NetCDF Output file path."
+        default=os.path.expanduser("~/RTTOV-gb"),
+        help="Runscript for RTTOV-gb."
     )
-    '''
     return parser.parse_args()
 
 ##############################################################################
@@ -109,29 +108,9 @@ def write1profile2str(t_array, ppmv_array,length_value,\
         string+=f"{value:12.6E}\n"
     string+=f"{t_array[-1]:10.4f}{p_array[-1]:10.2f}\n"
     string+=f"{height_in_km:6.3f}{deg_lat:6.1f}\n"
-    string+=f"{zenith_angle:6.1f}\n"
+    string+=f"{zenith_angle:6.4f}\n"
         
     return string
-
-##############################################################################
-
-def write_combined_input_prof_file(t_array, ppmv_array,length_value, p_array,height_in_km=0., deg_lat=50.,\
-                                   filename="prof_plev.dat", zenith_angle=0.):
-    with open(filename, "w") as file:
-        # print("pressure levels: ", length_value)
-        for value in p_array:
-            file.write(f"{value:8.4f}\n")  # eingerückt, 4 Nachkommastellen
-        for value in t_array:
-            file.write(f"{value:6.3f}\n")  # eingerückt, 4 Nachkommastellen
-        for value in ppmv_array:
-            file.write(f"{value:9.4f}\n")  # eingerückt, 4 Nachkommastellen
-        for value in range(len(ppmv_array)):
-            file.write(f"{0.:12.6E}\n")  # eingerückt, 4 Nachkommastellen
-        file.write(f"{t_array[-11]:10.4f}{p_array[-1]:10.2f}\n")
-        file.write(f"{height_in_km:6.1f}{deg_lat:6.1f}\n")
-        file.write(f"{zenith_angle:6.1f}\n")
-        
-        return 0
 
 ##############################################################################
 
@@ -153,45 +132,132 @@ def get_radisonde_tbs_of_file(rttovgb_outfile):
     file.close()
     return np.array(tbs_rs)
     
-##############################################################################
+###############################################################################
 
-def calc_TBs4_one_case(ang=90, model="RTTOV-gb"):
-    # Determine prams:
-    z, p, d, t, md = atmp.gl_atm(atm=1) # midlatitude summer!
-    gkg = ppmv2gkg(md[:, atmp.H2O], atmp.H2O)
-    rh = mr2rh(p, t, gkg)[0] / 100      
+def get_rttov_outputs(rttovgb_outfile=\
+        "/home/aki/RTTOV-gb/rttov_test/test_example_k.1/output_example_k.dat.gfortran-openmp",\
+                   n_azis=0,n_levels=0):
 
-    if model=="RTTOV-gb":
-        z_in = z*1000
-        ppmv = np.full((len(rh)), np.nan)
-        for i, rh1 in enumerate(rh):
-            ppmv[i] = rh2ppmv(RH=rh1*100, abs_T=t[i], p=p[i]*100)
+    print("Reading in RTTOV-gb output from: ", rttovgb_outfile)
+    
+    tbs = np.full((n_azis,14), np.nan)
+    '''
+    trans = np.full((batch_size, 14,10,2), np.nan)
+    # time, channel, elevation, crop
+    trans_by_lev=np.full((batch_size,n_levels, 14, 10,2 ), np.nan)
+    # time, level, channel, elevation, crop
+    jacs_by_lev=np.full((batch_size, n_levels, 14, 10,2, 4), np.nan)
+    # time, level, channel, elevation, crop, variable (last one removed in ds)
+    '''
+    
+    switch = False
+    tb_string = ""
+    switch_count = 0
+    '''
+    switch_t = False
+    sw_trans_by_lev=False
+    sw_jacs_by_lev=False
+    switcht_count = 0
+    sw_c_trans_by_lev = 0
+    sw_c_jacs_by_lev = 0
+    trans_string = ""
+    string_jc_by_lev=""
+    string_tr_by_lev = ""
+    '''
+
+    file = open(rttovgb_outfile, "r")
+    
+    # Read in TBs: 
+    for i, line in enumerate(file.readlines()):
+            
+        if "Profile      " in line:
+            prof_idx=int(line.split(" ")[-1])-1
+        
+        if switch and switch_count<2:
+            switch_count+= 1
+            tb_string+= line
+        elif "CALCULATED BRIGHTNESS TEMPERATURES (K):" in line:
+            switch = True
+        elif switch:
+            switch = False
+            liste = tb_string.split(" ")
+            tbs_rs = [float(s.strip("\n")) for s in liste if s.strip() != ""]
+            tb_string = ""
+            switch_count = 0
+            tbs[prof_idx,:] = np.array(tbs_rs)
+            # print("prof_idx: ",prof_idx)
+            # print("TBs rs: ", np.array(tbs_rs))
 
             
-        write_combined_input_prof_file(t[::-1], ppmv[::-1],len(ppmv), p[::-1],\
-                    height_in_km=z_in[1], deg_lat=50.,\
-                    filename="prof_plev.dat", zenith_angle=(90-ang))
-
-
-        nlevels=len(ppmv)
-        shutil.copy("prof_plev.dat", "/home/aki/RTTOV-gb/rttov_test/test_example_k.1/")
-        with open("/home/aki/RTTOV-gb/rttov_test/run_apschera.sh", "r") as f:
-            lines = f.readlines()
-            # Zeile 30 (Index 29) ersetzen
-        lines[28] = f"NPROF=1\n"    
-        lines[29] = f"NLEVELS={nlevels}\n"
-        with open("/home/aki/RTTOV-gb/rttov_test/run_apschera.sh", "w") as f:
-            f.writelines(lines) 
-        subprocess.run(["bash", "/home/aki/RTTOV-gb/rttov_test/run_apschera.sh", "ARCH=gfortran-openmp"],\
-                           cwd="/home/aki//RTTOV-gb/rttov_test/") 
+    '''
+        # Read in Tot Transmittances:     
+        if switch_t and switcht_count<2:
+            switcht_count+= 1
+            trans_string+= line
+        elif "CALCULATED SURFACE TO SPACE TRANSMITTANCE:" in line:
+            switch_t = True
+        elif switch_t:
+            switch_t = False
+            liste = trans_string.split(" ")
+            tot_trans_by_chan = [float(s.strip("\n")) for s in liste if s.strip() != ""]
+            trans_string = ""
+            switcht_count = 0
+            trans[rs_time_idx, :, ele_idx, crop_idx]=np.array(tot_trans_by_chan)
+          
+        # Read in Lev Transmittances:   
+        if sw_trans_by_lev and sw_c_trans_by_lev<n_levels:
+            sw_c_trans_by_lev+= 1
+            string_tr_by_lev+= line
+        elif "Level to surface transmittances for channels" in line:
+            sw_trans_by_lev = True
+        elif sw_trans_by_lev:
+            sw_trans_by_lev = False
+            liste = string_tr_by_lev.split("\n")[1:]  #.split(" ")
+            for j, line in enumerate(liste):
+                list_of_numbers = line.split(" ")
+                trans_by_lev1 = [float(s) for s in list_of_numbers if s.strip() != "" and s.strip() != "**"]
+                if len(trans_by_lev1)<4:
+                    break
+                elif 4<=len(trans_by_lev1)<5:
+                    trans_by_lev[rs_time_idx, j,10:, ele_idx, crop_idx]=\
+                        np.array(trans_by_lev1)
+                elif 5<=len(trans_by_lev1)<6:
+                    trans_by_lev[rs_time_idx, j,10:, ele_idx, crop_idx] =\
+                        np.array(trans_by_lev1[1:])                  
+                elif j<99:
+                    trans_by_lev[rs_time_idx, j,:10, ele_idx, crop_idx] =\
+                        np.array(trans_by_lev1[1:])
+                else:
+                    trans_by_lev[rs_time_idx, j,:10, ele_idx, crop_idx] =\
+                        np.array(trans_by_lev1)            
+            string_tr_by_lev = ""
+            sw_c_trans_by_lev = 0              
         
-        tbs = get_radisonde_tbs_of_file("/home/aki/RTTOV-gb/rttov_test/test_example_k.1/output_example_k.dat.gfortran")
-    
-    return tbs
+        # Read in Jacobians somehow:       
+        if "Channel        " in line:
+            sw_jacs_by_lev = True
+            ch_idx = int(line.split("Channel")[-1])-1
+        if sw_jacs_by_lev and sw_c_jacs_by_lev<n_levels+3:
+            sw_c_jacs_by_lev+= 1
+            string_jc_by_lev+= line
+        elif sw_jacs_by_lev:
+            liste = string_jc_by_lev.split("\n")[3:n_levels+3]
+            for j, line in enumerate(liste):
+                werte = line.split()
+                jacs_by_lev[rs_time_idx, j, ch_idx, ele_idx, crop_idx, :]=\
+                    werte[1:]
+            string_jc_by_lev=""
+            sw_jacs_by_lev = False
+            sw_c_jacs_by_lev= 0
+    '''
+            
+    file.close()
+    print("Finished reading RTTOV-gb output from: ", rttovgb_outfile)
+    return tbs #, trans, trans_by_lev, jacs_by_lev
 
 ###############################################################################
 
-def calc_TBs4_72_cases(angs=np.array([30]*len(azi_pairs)), model="RTTOV-gb"):
+def calc_TBs4_72_cases(args, angs=np.array([30]*len(azi_pairs)), model="RTTOV-gb"):
     # Determine prams:
     z, p, d, t, md = atmp.gl_atm(atm=1) # midlatitude summer!
     gkg = ppmv2gkg(md[:, atmp.H2O], atmp.H2O)
@@ -207,45 +273,47 @@ def calc_TBs4_72_cases(angs=np.array([30]*len(azi_pairs)), model="RTTOV-gb"):
         profiles = ""
         for ang in angs:
             profile1 = write1profile2str(t[::-1], ppmv[::-1],len(ppmv), p[::-1],\
-                    height_in_km=z_in[1], deg_lat=50.,\
+                    np.array([0.]*len(ppmv)), height_in_km=z_in[1], deg_lat=50.,\
                 zenith_angle=(90-ang), clear_sky_bool=True)
             profiles+=profile1
 
         # After loops - save results:
-        dir_name = os.path.dirname(args.input)
-        outfile = "prof_plev.dat"
+        dir_name = os.path.dirname(args.infile)
+        outfile = os.path.expanduser("~/prof_plev.dat")
         out = open(outfile, "w")
         out.write(profiles)
         out.close()
 
-        ########################
-        # Here I was just working....
-        # Trying to create an Input file and use it that has 72 entries instead of 1...
-        # I think the file exists now... It just needs to be processed in RTTOV-gb
-        # And the results have to be returned in the expected way in the function above...
+        # Modify runscript copy prof_plev.dat and run RTTOV-gb:
+        nlevels=len(ppmv)
+        shutil.copy(outfile, args.rttov+"/rttov_test/test_example_k.1/")
+        with open(args.rttov+"/rttov_test/run_apschera.sh", "r") as f:
+            lines = f.readlines()
+            # Zeile 30 (Index 29) ersetzen
+        lines[28] = f"NPROF="+str(len(angs))+"\n"    
+        lines[29] = f"NLEVELS={nlevels}\n"
+        with open(args.rttov+"/rttov_test/run_apschera.sh", "w") as f:
+            f.writelines(lines) 
+        subprocess.run(["bash", args.rttov+"/rttov_test/run_apschera.sh",\
+                "ARCH=gfortran-openmp"], cwd=args.rttov+"/rttov_test/") 
 
+        # Read outputs:
+        tbs = get_rttov_outputs(rttovgb_outfile=\
+            args.rttov+"/rttov_test/test_example_k.1/output_example_k.dat.gfortran-openmp",\
+            n_azis=len(angs),n_levels=nlevels)
 
+    return tbs
             
 ###############################################################################
 
-def calc_TB_diffs_360deg4tilt(azis,pair, ang0=30, tilt=0.5):
-    
-    ########################################
-    # Calculate TBs for all azimuth angles:
-    '''
-    tbs = np.full((len(azis), 14), np.nan)
-    for i, azi in enumerate(azis):
-        grad = azi-pair[0]
-        ang = ang0+tilt*np.cos(np.deg2rad(grad))
-        tbs[i,:] = calc_TBs4_one_case(ang=ang)
-    '''
-    #######################################
-    # Alternate:
+def calc_TB_diffs_360deg4tilt(azis,pair,args, ang0=30, tilt=0.5):
+
+    # Calculate Tbs for all 72 Azimuths:
     angs = []
     for i, azi in enumerate(azis):
         grad = azi-pair[0]
         angs.append(ang0+tilt*np.cos(np.deg2rad(grad)))
-    #######################################
+    tbs = calc_TBs4_72_cases(args, angs=np.array(angs), model="RTTOV-gb")
     
     # Calculate Tb differences for all angle pairs:
     dtbs_mod = np.full((len(azis), 14), np.nan)
@@ -260,24 +328,80 @@ def calc_TB_diffs_360deg4tilt(azis,pair, ang0=30, tilt=0.5):
 
 ###############################################################################
 
-def calc_estimated_tilt(azis,dtbs, pair_labels, elevation=30, azi_pairs=azi_pairs):
+def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
+        mask=None, azi_pairs=azi_pairs):
 
-    tilts = np.arange(0, 2, 0.1) # 200
+    ###############################################
+    
+    tilts = np.arange(0.1, 2, 0.1) # 200
+    all_dtbs_mod = np.full((len(azi_pairs), len(tilts), len(dtbs), 14), np.nan)
     sqr_diffs = np.full((len(azi_pairs), len(tilts)), np.nan)
     for i, pair in enumerate(azi_pairs):
         for j, i_tilt in enumerate(tilts):
-            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair, ang0=elevation, tilt=i_tilt)
-            ######################
-            sqr_diffs[i,j] = np.nanmean((dtbs-dtbs_mod)**2) # enthalten NaNs???
-            ########################
-                        
+            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
+                    ang0=elevation, tilt=i_tilt)
+            all_dtbs_mod[i,j,:,:] = dtbs_mod
+            sqr_diffs[i,j] = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+    '''
+    ############################################
+    tilts = []
+    sqr_diffs = []
+    i_tilt = 0.3
+    d_tilt = 0.001
+    all_dtbs_mod = np.full((len(azi_pairs), len(dtbs), 14), np.nan)
+    for i, pair in enumerate(azi_pairs):
+        for j in range(50):
+            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
+                    ang0=elevation, tilt=i_tilt+d_tilt)
+            sqr_diff2 = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+
+            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
+                    ang0=elevation, tilt=i_tilt)
+            sqr_diff1 = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+            
+            if (sqr_diff1 / ((sqr_diff2-sqr_diff1)/d_tilt))<=d_tilt:
+                print("Found zero for pair - Iterations:", j)
+                break
+            else:
+                print("Iteration: ", j)
+                print("sqr_diff: ", sqr_diff1)
+                print("tilt: ", i_tilt)
+                print("Gradient: ", ((sqr_diff2-sqr_diff1)/d_tilt))
+                i_tilt = i_tilt - sqr_diff1 / ((sqr_diff2-sqr_diff1)/d_tilt)
+            ##########################
+            # gradient = (sqr_diff2 - sqr_diff1) / d_tilt
+            # i_tilt = i_tilt - learning_rate * gradient   
+            ###########################
+        all_dtbs_mod[i,:,:] = dtbs_mod
+        sqr_diffs.append(sqr_diffs)
+        tilts.append(i_tilt)
+
+    # Get minimum difference between tilted model and measured data:
+    i_pair = np.nanargmin(sqr_diffs)
+    tilt       = tilts[i_pair]
+    angle_pair = azi_pairs[i_pair]
+    ###########################################
+        
+    '''
     # Get minimum difference between tilted model and measured data:
     flat_index = np.nanargmin(sqr_diffs)
     i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
     tilt       = tilts[i_tilt]
     angle_pair = azi_pairs[i_pair]
     
-    return tilt, angle_pair
+    return tilt, angle_pair, all_dtbs_mod[i_pair, i_tilt ,:,:]
+
+##############################################################################
+
+def get_channel_mask(dtbs):
+    maxima = np.nanmax(dtbs, axis=0)
+    minima = np.nanmin(dtbs, axis=0)
+    idx_high = np.argsort(maxima)[-2:]   # die 2 größten
+    idx_low  = np.argsort(minima)[:2]    # die 2 kleinsten
+    exclude = np.union1d(idx_high, idx_low)
+    mask = np.ones(dtbs.shape[1], dtype=bool)
+    mask[exclude] = False
+    return mask
 
 ##############################################################################
 # 5th Main code:
@@ -289,18 +413,36 @@ if __name__=="__main__":
 
     i_elev=0 # 30 ° Elevation!
     azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
-    tilt, angle_pair = calc_estimated_tilt(azis,dtbs, pair_labels,\
-                                    elevation=ds["elevation"].values[i_elev])
+    mask = get_channel_mask(dtbs)
+    tilt, angle_pair, dtbs_mod = calc_estimated_tilt(azis,dtbs, pair_labels,\
+        args, elevation=ds["elevation"].values[i_elev],mask=mask)
+
+    # Create a comparison plot:
+    grad = azis
+    theta = np.deg2rad(grad)  # Grad → Radiant
+    plt.figure(figsize=(15,10))
+    plt.title("Detected 360° Azimuth instrument tilt: Angle "+str(tilt)+\
+        "° Between high and low angle:  "+str(angle_pair)+"°")
+    plt.plot(theta[::1], np.nanmean(dtbs[:, mask], axis=1), label="Instrument")
+    plt.plot(theta[::1], np.nanmean(dtbs_mod[:,mask],axis=1), label="Model")
+    plt.xticks(theta[::5], pair_labels[::5], rotation=45, ha='right')
+    plt.legend()
+    plt.savefig(os.path.expanduser("~/tilt_plot.png"))
+
+    # Datafile:
+    with open(os.path.expanduser("~/tilt_detection.txt"), "w") as f:
+        f.writelines("Tilt: "+str(tilt)+"°\n") 
+        f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
+        f.writelines("TB differences: "+str(dtbs_mod))
 
     #################
-    # Possible improvements:
-    # 1st Handle data from several angles (the full 360 deg azimuth scan)
-    # together in one prof_plev.dat file (less reading and writing)
-    # 2nd Create a plot at the end of the run of the modelled TB sin wave 
-    # and data TB sin wave.
-    # 2.5th Write an output file with all data! (Input to next step: Correction!)
-    # 3rd: Maybe exclude channels which strongly deviate from all others
-    # 4th What can I do to exclude general Water Vapor features of the landscape...?
+    # For correction i probably have to save the dtbs_mod to subtract them from
+    # a measurement...
+    # 0th add corrected dataset with correction mask NetCDF...
+    # 1. Only use clear sky TBs!!!
+    # 2. What can I do to exclude general Water Vapor features of the landscape...?
+    # 3. get another profile from a radiosonde instead of pure clim!
+    # 4. Add newtons method to determine tilt value instead of monte carlo!
 
 
 
