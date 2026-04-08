@@ -17,11 +17,13 @@ from pyrtlib.tb_spectrum import TbCloudRTE
 from pyrtlib.utils import ppmv2gkg, mr2rh
 import shutil
 import subprocess
+import matplotlib
 
 ##############################################################################
 # 2nd Params:
 ##############################################################################
 
+matplotlib.use("Agg")
 first_col = np.arange(0, 360, 5)
 second_col = (first_col + 180) % 360
 azi_pairs = np.column_stack([first_col, second_col])
@@ -111,26 +113,6 @@ def write1profile2str(t_array, ppmv_array,length_value,\
     string+=f"{zenith_angle:6.4f}\n"
         
     return string
-
-##############################################################################
-
-def get_radisonde_tbs_of_file(rttovgb_outfile):
-    # Diese Funktion läuft einwandfrei.
-    switch = False
-    switch_count = 0
-    tb_string = ""
-    file = open(rttovgb_outfile, "r")
-    for i, line in enumerate(file.readlines()):
-        if switch and switch_count<2:
-            switch_count+= 1
-            tb_string+= line
-        elif "CALCULATED BRIGHTNESS TEMPERATURES (K):" in line:
-            switch = True
-    liste = tb_string.split(" ")
-    tbs_rs = [float(s.strip("\n")) for s in liste if s.strip() != ""]
-    
-    file.close()
-    return np.array(tbs_rs)
     
 ###############################################################################
 
@@ -331,9 +313,9 @@ def calc_TB_diffs_360deg4tilt(azis,pair,args, ang0=30, tilt=0.5):
 def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
         mask=None, azi_pairs=azi_pairs):
 
-    ###############################################
-    
-    tilts = np.arange(0.1, 2, 0.1) # 200
+    ###
+    # 1st round: 
+    tilts = np.arange(0.01, 2, 0.25) # 20 => ca 8.
     all_dtbs_mod = np.full((len(azi_pairs), len(tilts), len(dtbs), 14), np.nan)
     sqr_diffs = np.full((len(azi_pairs), len(tilts)), np.nan)
     for i, pair in enumerate(azi_pairs):
@@ -342,6 +324,36 @@ def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
                     ang0=elevation, tilt=i_tilt)
             all_dtbs_mod[i,j,:,:] = dtbs_mod
             sqr_diffs[i,j] = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+
+    ###
+    #2nd round:
+    flat_index = np.nanargmin(sqr_diffs)
+    i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
+    tilt       = tilts[i_tilt]
+    angle_pair = azi_pairs[i_pair]
+    print("First tilt: ", tilt)
+    print("First angle: ", angle_pair )
+    start = np.max([tilt-0.25, 0])
+    star_index_pair = np.max([0, i_pair-1])
+    new_pairs = azi_pairs[star_index_pair : i_pair+1]
+    tilts = np.arange(start, tilt+0.25, 0.01)
+    print("tilts: ", tilts)
+    print("New pairs: ", new_pairs)
+    all_dtbs_mod = np.full((len(new_pairs), len(tilts), len(dtbs), 14), np.nan)
+    sqr_diffs = np.full((len(new_pairs), len(tilts)), np.nan)
+    for i, pair in enumerate(new_pairs):
+        for j, i_tilt in enumerate(tilts):
+            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
+                    ang0=elevation, tilt=i_tilt)
+            all_dtbs_mod[i,j,:,:] = dtbs_mod
+            sqr_diffs[i,j] = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+
+    # Get minimum difference between tilted model and measured data:
+    flat_index = np.nanargmin(sqr_diffs)
+    i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
+    tilt       = tilts[i_tilt]
+    angle_pair = new_pairs[i_pair]
+
     '''
     ############################################
     tilts = []
@@ -382,13 +394,13 @@ def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
     angle_pair = azi_pairs[i_pair]
     ###########################################
         
-    '''
+    
     # Get minimum difference between tilted model and measured data:
     flat_index = np.nanargmin(sqr_diffs)
     i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
     tilt       = tilts[i_tilt]
     angle_pair = azi_pairs[i_pair]
-    
+    '''
     return tilt, angle_pair, all_dtbs_mod[i_pair, i_tilt ,:,:]
 
 ##############################################################################
@@ -421,8 +433,8 @@ if __name__=="__main__":
     grad = azis
     theta = np.deg2rad(grad)  # Grad → Radiant
     plt.figure(figsize=(15,10))
-    plt.title("Detected 360° Azimuth instrument tilt: Angle "+str(tilt)+\
-        "° Between high and low angle:  "+str(angle_pair)+"°")
+    plt.title(f"Detected 360° Azimuth instrument tilt: Angle {tilt:.2f}°"
+          f" Between high and low angle: {angle_pair}°")
     plt.plot(theta[::1], np.nanmean(dtbs[:, mask], axis=1), label="Instrument")
     plt.plot(theta[::1], np.nanmean(dtbs_mod[:,mask],axis=1), label="Model")
     plt.xticks(theta[::5], pair_labels[::5], rotation=45, ha='right')
@@ -436,10 +448,21 @@ if __name__=="__main__":
         f.writelines("TB differences: "+str(dtbs_mod))
 
     #################
+
+    # Tilt timeseries!!!
+
+    # CLEANER DATASETS
+    # 1. Only use clear sky TBs!!!
+    # Exclude RFI Interferences!!! (Tobis Paper???
+
+
+    # CORRECTION!!!
     # For correction i probably have to save the dtbs_mod to subtract them from
     # a measurement...
     # 0th add corrected dataset with correction mask NetCDF...
-    # 1. Only use clear sky TBs!!!
+
+
+    ##############
     # 2. What can I do to exclude general Water Vapor features of the landscape...?
     # 3. get another profile from a radiosonde instead of pure clim!
     # 4. Add newtons method to determine tilt value instead of monte carlo!
