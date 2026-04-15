@@ -416,12 +416,72 @@ def get_channel_mask(dtbs):
     return mask
 
 ##############################################################################
+
+def clear_dataset(ds_in):
+    
+    n_time = ds_in.sizes["time"]
+    clear_mask = np.ones(n_time, dtype=bool)  # alle True = behalten
+
+    if "liquid_cloud_flag" in ds_in:
+        cf = ds_in["liquid_cloud_flag"].values
+        clear_mask &= (cf == 0)
+    else:
+        print("Info: liquid_cloud_flag nicht im Dataset — kein Cloud-Filter.")
+
+    if "rainfall_rate" in ds_in:
+        rr = ds_in["rainfall_rate"].values
+        fill = 9.96921e+36
+        rr_clean = np.where(np.abs(rr) >= fill, 0.0, rr)  # FillValue als 0 behandeln
+        clear_mask &= (rr_clean == 0)
+    else:
+        print("Info: rainfall_rate nicht im Dataset — kein Regen-Filter.")
+
+    n_clear = np.sum(clear_mask)
+    print(f"Zeitschritte gesamt: {n_time} | nach Filter: {n_clear} "
+          f"({100*n_clear/n_time:.1f}% behalten)")
+
+    ds_out = ds_in.isel(time=clear_mask)
+    return ds_out
+
+##############################################################################
+
+def derive_rfi_angles(ds, i_elev=0, thrshld=1.):
+    
+    scan_diffs = np.full((len(ds["time"]),len(ds["azimuth"]), len(ds["N_Channels"])), np.nan)
+    elevation = ds["elevation"].values[i_elev]
+    
+    # every angle - min
+    for i in range(len(ds["time"])):
+        minima_by_chan = np.nanmin(ds["tb"].isel(time=i).isel(elevation=i_elev).values, axis=0)
+        tbs_by_azi_chan = ds["tb"].isel(time=i).isel(elevation=i_elev).values
+        scan_diffs[i,:,:] = tbs_by_azi_chan-minima_by_chan
+    
+    # difference above 1 K - likely a disturbance...
+    rfi_mask = scan_diffs < 1
+    # Convert to dataArray:
+    rfi_mask_da = xr.DataArray(
+        rfi_mask,
+        dims=["time", "azimuth", "N_Channels"],
+        coords={
+            "time":       ds["time"],
+            "azimuth":    ds["azimuth"],
+            "N_Channels": ds["N_Channels"],
+        }
+    )
+    return rfi_mask_da
+
+##############################################################################
 # 5th Main code:
 ##############################################################################
 
 if __name__=="__main__":    
     args = parse_arguments()
-    ds = xr.open_dataset(args.infile)
+    ds0 = xr.open_dataset(args.infile)
+
+    # Exclude clouds & RFI:
+    ds = clear_dataset(ds0)
+    rfi_mask_da = derive_rfi_angles(ds)
+    ds["tb"] = ds["tb"].where(rfi_mask_da)
 
     i_elev=0 # 30 ° Elevation!
     azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
@@ -453,6 +513,9 @@ if __name__=="__main__":
 
     # CLEANER DATASETS
     # 1. Only use clear sky TBs!!!
+
+
+
     # Exclude RFI Interferences!!! (Tobis Paper???
 
 
