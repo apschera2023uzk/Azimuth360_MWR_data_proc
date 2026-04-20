@@ -1,0 +1,6 @@
+Tilt: 0.24000000000000005°
+Angle_pair: [310 130]°
+
+Datenpunkte: vorher=22174096, nachher=19916402, ausgeschlossen=2257694 (10.2%)
+Azimuthe gesamt: 72 | komplett ausgeschlossen: 1 | teilweise ausgeschlossen: 71 | vollständig valide: 0
+RFI assumed by more than 1.3 sigmas of scan.

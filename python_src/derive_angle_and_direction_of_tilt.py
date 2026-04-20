@@ -17,6 +17,7 @@ from pyrtlib.tb_spectrum import TbCloudRTE
 from pyrtlib.utils import ppmv2gkg, mr2rh
 import shutil
 import subprocess
+import matplotlib.ticker as ticker
 import matplotlib
 
 ##############################################################################
@@ -27,6 +28,7 @@ matplotlib.use("Agg")
 first_col = np.arange(0, 360, 5)
 second_col = (first_col + 180) % 360
 azi_pairs = np.column_stack([first_col, second_col])
+n_sigmas_rfi = 1.3
 
 ##############################################################################
 # 3rd Argparse
@@ -311,7 +313,7 @@ def calc_TB_diffs_360deg4tilt(azis,pair,args, ang0=30, tilt=0.5):
 ###############################################################################
 
 def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
-        mask=None, azi_pairs=azi_pairs):
+        azi_pairs=azi_pairs):
 
     ###
     # 1st round: 
@@ -323,7 +325,7 @@ def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
             dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
                     ang0=elevation, tilt=i_tilt)
             all_dtbs_mod[i,j,:,:] = dtbs_mod
-            sqr_diffs[i,j] = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+            sqr_diffs[i,j] = np.nanmean((dtbs[:,:]-dtbs_mod[:,:])**2)
 
     ###
     #2nd round:
@@ -346,7 +348,7 @@ def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
             dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
                     ang0=elevation, tilt=i_tilt)
             all_dtbs_mod[i,j,:,:] = dtbs_mod
-            sqr_diffs[i,j] = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
+            sqr_diffs[i,j] = np.nanmean((dtbs[:,:]-dtbs_mod[:,:])**2)
 
     # Get minimum difference between tilted model and measured data:
     flat_index = np.nanargmin(sqr_diffs)
@@ -404,7 +406,7 @@ def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
     return tilt, angle_pair, all_dtbs_mod[i_pair, i_tilt ,:,:]
 
 ##############################################################################
-
+'''
 def get_channel_mask(dtbs):
     maxima = np.nanmax(dtbs, axis=0)
     minima = np.nanmin(dtbs, axis=0)
@@ -414,7 +416,7 @@ def get_channel_mask(dtbs):
     mask = np.ones(dtbs.shape[1], dtype=bool)
     mask[exclude] = False
     return mask
-
+'''
 ##############################################################################
 
 def clear_dataset(ds_in):
@@ -445,20 +447,27 @@ def clear_dataset(ds_in):
 
 ##############################################################################
 
-def derive_rfi_angles(ds, i_elev=0, thrshld=1.):
+def adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi):
+    # std über alle Azimuthe pro (time, channel):
+    std_per_chan = np.nanstd(scan_diffs, axis=1, keepdims=True)  # (time,1,chan)
+    mean_per_chan = np.nanmean(scan_diffs, axis=1, keepdims=True)
+    threshold = mean_per_chan + n_sigma * std_per_chan
+    return scan_diffs < threshold  # True = no RFI
+
+##############################################################################
+
+def derive_rfi_angles(ds, i_elev=0, n_sigmas_rfi=n_sigmas_rfi):
     
-    scan_diffs = np.full((len(ds["time"]),len(ds["azimuth"]), len(ds["N_Channels"])), np.nan)
-    elevation = ds["elevation"].values[i_elev]
-    
-    # every angle - min
-    for i in range(len(ds["time"])):
-        minima_by_chan = np.nanmin(ds["tb"].isel(time=i).isel(elevation=i_elev).values, axis=0)
-        tbs_by_azi_chan = ds["tb"].isel(time=i).isel(elevation=i_elev).values
-        scan_diffs[i,:,:] = tbs_by_azi_chan-minima_by_chan
-    
-    # difference above 1 K - likely a disturbance...
-    rfi_mask = scan_diffs < 1
-    # Convert to dataArray:
+    # Extract array once and use numpy operations afterwards for speed up:
+    tb_all = ds["tb"].isel(elevation=i_elev).values  # (time, azimuth, N_Channels)
+
+    # vectorized operation for scan_diffs:
+    minima_by_chan = np.nanmin(tb_all, axis=1, keepdims=True)  # (time, 1, N_Channels)
+    scan_diffs     = tb_all - minima_by_chan                    # (time, azimuth, N_Channels)
+
+    #Calc and apply threshold:
+    rfi_mask = adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi)  # ← kein zweites < mehr!
+
     rfi_mask_da = xr.DataArray(
         rfi_mask,
         dims=["time", "azimuth", "N_Channels"],
@@ -471,53 +480,136 @@ def derive_rfi_angles(ds, i_elev=0, thrshld=1.):
     return rfi_mask_da
 
 ##############################################################################
+
+def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,
+                         save_path=os.path.expanduser("~/tilt_plot.png")):
+
+    grad  = azis
+    theta = np.deg2rad(grad)
+
+    # ── Style ────────────────────────────────────────────────────────────────
+    plt.rcParams.update({
+        "font.family":      "serif",
+        "font.serif":       ["Times New Roman", "DejaVu Serif"],
+        "font.size":        13,
+        "axes.linewidth":   1.2,
+        "axes.spines.top":  False,
+        "axes.spines.right":False,
+        "xtick.direction":  "in",
+        "ytick.direction":  "in",
+        "xtick.major.size": 5,
+        "ytick.major.size": 5,
+        "legend.frameon":   True,
+        "legend.framealpha":0.9,
+        "legend.edgecolor": "0.7",
+    })
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+    y_meas = np.nanmean(dtbs,     axis=1)   # (azimuth,)
+    y_mod  = np.nanmean(dtbs_mod, axis=1)
+
+    ax.plot(grad, y_meas,
+            color="#1f4e79", lw=1.8, marker="o", ms=3.5,
+            label="Observed TB difference")
+    ax.plot(grad, y_mod,
+            color="#c0392b", lw=2.0, ls="--",
+            label=f"Modelled tilt signal ({tilt:.2f}°)")
+
+    ax.axhline(0, color="0.4", lw=0.8, ls=":")
+
+    # ── Axes ─────────────────────────────────────────────────────────────────
+    ax.set_xlim(grad.min(), grad.max())
+    ax.set_xlabel("Azimuth angle [°]", fontsize=14)
+    ax.set_ylabel(r"Mean $\Delta T_\mathrm{B}$ [K]", fontsize=14)
+
+    ax.set_xticks(grad[::5])
+    ax.set_xticklabels(pair_labels[::5], rotation=45, ha='right', fontsize=10)
+
+    ax.yaxis.set_minor_locator(ticker.AutoMinorLocator(2))
+
+    # ── Annotations ──────────────────────────────────────────────────────────
+    ax.set_title(
+        f"Azimuthal brightness temperature differences and estimated instrument tilt\n"
+        f"Tilt magnitude: {tilt:.2f}°   |   "
+        f"Identified tilt angles: {angle_pair[0]:.0f}° (high) to {angle_pair[1]:.0f}° (low) | Tilt axes: {(angle_pair[0]+90)%360}° - {(angle_pair[1]+90)%360}°",
+        fontsize=13, pad=12, loc="left"
+    )
+
+    ax.legend(loc="upper right", fontsize=12)
+
+    # ── Tilt-axis marker ─────────────────────────────────────────────────────
+    for ang in angle_pair:
+        ax.axvline(ang, color="#c0392b", lw=0.8, ls=":", alpha=0.6)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {save_path}")
+
+##############################################################################
 # 5th Main code:
 ##############################################################################
 
 if __name__=="__main__":    
     args = parse_arguments()
     ds0 = xr.open_dataset(args.infile)
+    i_elev=0 # 30 ° Elevation!
 
     # Exclude clouds & RFI:
     ds = clear_dataset(ds0)
+    n_before = int(np.sum(~np.isnan(ds.isel(elevation=i_elev)["tb"].values)))
     rfi_mask_da = derive_rfi_angles(ds)
-    ds["tb"] = ds["tb"].where(rfi_mask_da)
-
-    i_elev=0 # 30 ° Elevation!
+    ds["tb"] = ds["tb"].where(rfi_mask_da)    
     azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
-    mask = get_channel_mask(dtbs)
+    # mask = get_channel_mask(dtbs)
     tilt, angle_pair, dtbs_mod = calc_estimated_tilt(azis,dtbs, pair_labels,\
-        args, elevation=ds["elevation"].values[i_elev],mask=mask)
+        args, elevation=ds["elevation"].values[i_elev])
 
-    # Create a comparison plot:
+    ####
+    # Create a comparison plot: => def function
+    plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair)
+    '''
     grad = azis
     theta = np.deg2rad(grad)  # Grad → Radiant
     plt.figure(figsize=(15,10))
     plt.title(f"Detected 360° Azimuth instrument tilt: Angle {tilt:.2f}°"
           f" Between high and low angle: {angle_pair}°")
-    plt.plot(theta[::1], np.nanmean(dtbs[:, mask], axis=1), label="Instrument")
-    plt.plot(theta[::1], np.nanmean(dtbs_mod[:,mask],axis=1), label="Model")
+    plt.plot(theta[::1], np.nanmean(dtbs[:, :], axis=1), label="Instrument")
+    plt.plot(theta[::1], np.nanmean(dtbs_mod[:,:],axis=1), label="Model")
     plt.xticks(theta[::5], pair_labels[::5], rotation=45, ha='right')
     plt.legend()
     plt.savefig(os.path.expanduser("~/tilt_plot.png"))
+    '''
 
-    # Datafile:
+    ####
+    # calc RFI stats: => def function
+    n_total  = int(np.sum(~np.isnan(ds["tb"].values)))
+    azi_any_excluded  = (~rfi_mask_da).any(dim=["time", "N_Channels"]).values
+    azi_all_excluded  = (~rfi_mask_da).all(dim=["time", "N_Channels"]).values
+    n_azi_total       = len(ds["azimuth"])
+    n_azi_fully_bad   = int(np.sum(azi_all_excluded))
+    n_azi_partly_bad  = int(np.sum(azi_any_excluded)) - n_azi_fully_bad
+    n_azi_clean       = n_azi_total - n_azi_fully_bad - n_azi_partly_bad
+
+    ####
+    # Datafile: => def function
     with open(os.path.expanduser("~/tilt_detection.txt"), "w") as f:
         f.writelines("Tilt: "+str(tilt)+"°\n") 
         f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
-        f.writelines("TB differences: "+str(dtbs_mod))
+        f.writelines(f"\nDatenpunkte: vorher={n_before}, nachher={n_total}, "
+          f"ausgeschlossen={n_before - n_total} "
+          f"({100*(n_before-n_total)/n_before:.1f}%)")
+        f.writelines(f"\nAzimuthe gesamt: {n_azi_total} | "
+          f"komplett ausgeschlossen: {n_azi_fully_bad} | "
+          f"teilweise ausgeschlossen: {n_azi_partly_bad} | "
+          f"vollständig valide: {n_azi_clean}")
+        f.writelines(f"\nRFI assumed by more than {n_sigmas_rfi} sigmas of scan.")
 
     #################
 
     # Tilt timeseries!!!
-
-    # CLEANER DATASETS
-    # 1. Only use clear sky TBs!!!
-
-
-
-    # Exclude RFI Interferences!!! (Tobis Paper???
-
 
     # CORRECTION!!!
     # For correction i probably have to save the dtbs_mod to subtract them from
@@ -527,7 +619,7 @@ if __name__=="__main__":
 
     ##############
     # 2. What can I do to exclude general Water Vapor features of the landscape...?
-    # 3. get another profile from a radiosonde instead of pure clim!
+    # 3. get another profile from a radiosonde instead of pure clim! => or mean profile of these TBs...
     # 4. Add newtons method to determine tilt value instead of monte carlo!
 
 
