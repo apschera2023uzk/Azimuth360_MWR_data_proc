@@ -30,14 +30,16 @@ def parse_arguments():
     parser.add_argument(
         "--in_pattern", "-i",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
+        default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
         help="Pattern of MWR output files with TBs of scans."
     )
     parser.add_argument(
         "--outfile", "-o",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         help="NetCDF Output file path."
     )
     return parser.parse_args()
@@ -134,7 +136,13 @@ def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,\
             # Bitwise OR: wenn irgendein Zeitschritt ein Bit hat, bleibt es gesetzt
             flag_vals = ds_old["flag"].values[timeslice]
             fill = 0  # _FillValue ist 0s
-            flag_vals_valid = flag_vals[flag_vals != fill].astype(int)
+
+            ###########################
+            # Alternate Nan-Filter:
+            # flag_vals_valid = flag_vals[flag_vals != fill].astype(int)
+            flag_vals_valid = flag_vals[~np.isnan(flag_vals) & (flag_vals != fill)].astype(int)
+            ########################
+
             if len(flag_vals_valid) > 0:
                 combined = 0
                 for fv in flag_vals_valid:
@@ -287,6 +295,7 @@ def resample_mwr_ds_on_scan_freq(ds_old):
 # 5th Main code:
 ##############################################################################
 
+'''
 if __name__=="__main__":    
     args = parse_arguments()
     files = glob.glob(args.in_pattern)
@@ -308,6 +317,39 @@ if __name__=="__main__":
     print(ds_joy["time"])
 
     ds_joy.to_netcdf(args.outfile)#, format="NETCDF4_CLASSIC")
+'''
+
+# Claude variant against RAM shortage:
+if __name__ == "__main__":
+    args = parse_arguments()
+    files = sorted(glob.glob(args.in_pattern))
+    n = len(files)
+
+    tmp_files = []
+    for i, file in enumerate(files):
+        print(f"Read file {i} of {n}")
+        ds = xr.open_dataset(file)
+        ds_resamp = resample_mwr_ds_on_scan_freq(ds)
+        ds_resamp = ds_resamp.assign_coords(
+            time=ds_resamp["time"].astype("datetime64[ns]"))
+
+        # Direkt als temp-Datei schreiben statt in RAM halten:
+        tmp_path = args.outfile + f".tmp_{i:04d}.nc"
+        ds_resamp.to_netcdf(tmp_path)
+        tmp_files.append(tmp_path)
+        ds.close()
+        ds_resamp.close()
+
+    # Am Ende lazy einlesen und zusammenfügen:
+    print("Concatenating...")
+    ds_final = xr.open_mfdataset(tmp_files, combine="by_coords")
+    ds_final.to_netcdf(args.outfile)
+
+    # Temp-Dateien aufräumen:
+    for tmp in tmp_files:
+        os.remove(tmp)
+
+    print("Done:", args.outfile)
 
 
 ###################################################

@@ -504,7 +504,7 @@ def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,
         "legend.edgecolor": "0.7",
     })
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(16, 9))
 
     # ── Data ─────────────────────────────────────────────────────────────────
     y_meas = np.nanmean(dtbs,     axis=1)   # (azimuth,)

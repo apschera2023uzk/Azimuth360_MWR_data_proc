@@ -273,13 +273,6 @@ def calc_TBs4_72_cases(args, azis=azimuths, elevation=10, model="RTTOV-gb",\
                 factor = wv_factor4x(x, maxfac=maxfac, minfac=minfac)
                 ppmv[i,j] = rh2ppmv(RH=rh1*100, abs_T=t[i], p=p[i]*100)*factor
 
-                '''
-                print("***************")
-                print("azi: ", azi)
-                print("z => x", z1, " => ", x)
-                print("factor: ", factor)
-                print("ppmv: ", ppmv[i,j])
-                '''
         # Processing for 72 Azimuths
         profiles = ""
         for j, azi in enumerate(azis):
@@ -343,11 +336,11 @@ def plot_wv_colorplot(args, lvl=1, resol=100, maxfac=1.15, minfac=0.85):
     # Determine params:
     z, p, d, t, md = atmp.gl_atm(atm=1) # midlatitude summer!
     gkg = ppmv2gkg(md[:, atmp.H2O], atmp.H2O)      
-    xs = np.linspace(-40000,40000,resol)
-    ys = np.linspace(-40000,40000,resol)
+    xs = np.linspace(-40,40,resol)
+    ys = np.linspace(-40,40,resol)
     facs = []
     for x in xs:
-        facs.append(wv_factor4x(x, maxfac=maxfac, minfac=minfac))
+        facs.append(wv_factor4x(x*1000, maxfac=maxfac, minfac=minfac))
 
     c = np.array(facs) * float(gkg[lvl])
     z_title = z[lvl]*1000
@@ -364,7 +357,7 @@ def plot_wv_colorplot(args, lvl=1, resol=100, maxfac=1.15, minfac=0.85):
     plt.axvline(0, color="black")
     plt.ylim(6, 11)
     plt.ylabel("WV mixing ratio [g/kg]")
-    plt.xlabel("x [m]")
+    plt.xlabel("x [km]")
     plt.tight_layout()
     plt.savefig(outpath+f"/lineplot_wv_{(maxfac-1)*100:.0f}_percent.png",
                 dpi=150)
@@ -380,8 +373,8 @@ def plot_wv_colorplot(args, lvl=1, resol=100, maxfac=1.15, minfac=0.85):
     plt.title(f"Horizontal water vapor gradient (z = {z_title} m)\n WV perturbation: {(maxfac-1)*100:.0f} %")
     plt.scatter([0],[0], marker="X", color="red", linewidth=3,\
         label="MWR position")
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
+    plt.xlabel("x [km]")
+    plt.ylabel("y [km]")
     plt.tight_layout()
     plt.savefig(outpath+f"/colorplot_wv_{(maxfac-1)*100}_percent.png",
                 dpi=150)
@@ -399,8 +392,8 @@ def plot_wv_colorplot(args, lvl=1, resol=100, maxfac=1.15, minfac=0.85):
     plt.title(f"Horizontal water vapor gradient (seen by DIAL / (z = {z_title} m)\n WV perturbation: {(maxfac-1)*100:.0f} %")
     plt.scatter([0],[0], marker="X", color="red", linewidth=3,\
         label="MWR position")
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
+    plt.xlabel("x [km]")
+    plt.ylabel("y [km]")
     plt.tight_layout()
     plt.savefig(outpath+f"/colorplot_wv_DIAL_{(maxfac-1)*100:.0f}.png",
                 dpi=150)
@@ -459,14 +452,25 @@ def create_TBdiff_plot(azis, dtbs, pair_labels, elevation=10, maxfac=1.5):
     for i in range(7):
         ax.plot(theta, dtbs[:, i], marker='o', markersize=6, label=f"Ch {i+1}")
 
-    ax.grid(True)
+    ax.grid(True, linewidth=0.8, alpha=0.7)
     ax.set_theta_zero_location('N')
     ax.set_title(f'Mean TB difference between opposite pointing azimuth angles\n'
-                 f'Elevation: {elevation}°, WV gradient: {(maxfac-1)*100:.0f}%\n(K-Band)')
-    ax.set_xticks(theta[::5])
-    ax.set_xticklabels(pair_labels[::5])
-    ax.legend(loc="lower right", fontsize=10)
+                 f'Elevation: {elevation}°, WV gradient: {(maxfac-1)*100:.0f}%\n(K-Band)',
+                 fontsize=20, pad=15)
 
+    # Zero line thicker:
+    ax.plot(np.linspace(0, 2*np.pi, 300), np.zeros(300),
+            color='black', lw=2.0, zorder=5)
+
+    # Fixed radial limits:
+    ax.set_ylim(-12, 12)
+    ax.set_yticks([-12, -8, -4, 0, 4, 8, 12])
+    ax.set_yticklabels(['-12', '-8', '-4', '0', '4', '8', '12'], fontsize=11)
+
+    ax.set_xticks(theta[::5])
+    ax.set_xticklabels(pair_labels[::5], fontsize=16)
+
+    ax.legend(loc="lower right", fontsize=13, title="Channel", title_fontsize=20)
     plt.tight_layout()
     plt.savefig(outpath + f"/Azimuth_TBdiffs_{elevation}_{(maxfac-1)*100:.0f}_percent.png",
                 dpi=150)
