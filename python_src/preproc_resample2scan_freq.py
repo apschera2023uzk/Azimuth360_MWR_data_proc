@@ -30,16 +30,26 @@ def parse_arguments():
     parser.add_argument(
         "--in_pattern", "-i",
         type=str,
-        default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/*/MWR_1C01_sinthern_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),
         help="Pattern of MWR output files with TBs of scans."
     )
     parser.add_argument(
         "--outfile", "-o",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         help="NetCDF Output file path."
     )
     return parser.parse_args()
@@ -59,37 +69,49 @@ def interpolate_azimuths(ds, ele_var="ele", tb_var="tb"):
 ###############################################################################
 
 def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
-                          max_elev_azi_diff=max_elev_azi_diff):
+                          max_elev_azi_diff=max_elev_azi_diff, max_ele=85):
     # Output: list of lists, because each scan is one list of indices!
     time_indices_list_list = []
+    BL_time_indices_list_list = []
     scan_switch = False
     ele_old = 90
     
     for i, timestep in enumerate(ds_in["time"].values):
         ele_curr = ds_in[ele_var].values[i]
+        azi_curr = ds_in[azi_var].values[i]
 
-        if scan_switch and ele_curr<90:
-            if abs(ele_curr-ele_old)<max_elev_azi_diff:
-                scan_list.append(i)
-            else:
-                scan_switch = False
-                if len(scan_list)>3:
-                    time_indices_list_list.append(scan_list)
-        elif ele_curr<90:
+        # Values are clearly invalid:
+        if ele_curr<0 or ele_curr>180:
+            continue
+
+        # Scan is going on:
+        if scan_switch and ele_curr<max_ele:
+            scan_list.append(i)
+            
+        # Scan starts:
+        elif ele_curr<max_ele:
             scan_switch = True
             scan_list = []
             scan_list.append(i)
-        elif abs(ele_curr-ele_old)>max_elev_azi_diff and scan_switch:
+
+        # Scan ends:
+        elif max_ele<=ele_curr and scan_switch:
             scan_switch = False
-            if len(scan_list)>3:
+            if len(scan_list)>10: # distinguish BL scans with 10 elevs from Azis at 360°
+                #############
+                # print("len(scan_list): ", len(scan_list))
+                #############
                 time_indices_list_list.append(scan_list)
+            else:
+                BL_time_indices_list_list.append(scan_list)
+                
         else:
             continue
             
         ele_old = ds_in[ele_var].values[i]
         azi_old = ds_in[azi_var].values[i]
     
-    return time_indices_list_list
+    return time_indices_list_list, BL_time_indices_list_list
 
 ###############################################################################
 
@@ -277,8 +299,8 @@ def resample_mwr_ds_on_scan_freq(ds_old):
     ele_var, azi_var, tb_var = determine_ds_vars4elev_azi_TB(ds_old)
     
     # 1st determine timeslices with const elev<90 and variable azi.
-    time_indices_list_list = determine_scan_slices(ds_old,\
-                        ele_var=ele_var, azi_var=azi_var)
+    time_indices_list_list, BL_time_indices_list_list =\
+        determine_scan_slices(ds_old, ele_var=ele_var, azi_var=azi_var)
     
     # 2nd calc mean timestamp and mean measurements for these timeslices
     time_array, tbs, flags, rainfall = determine_data_in_time_for_scanset(ds_old,\
@@ -295,30 +317,6 @@ def resample_mwr_ds_on_scan_freq(ds_old):
 # 5th Main code:
 ##############################################################################
 
-'''
-if __name__=="__main__":    
-    args = parse_arguments()
-    files = glob.glob(args.in_pattern)
-    n = len(files)
-    ds_list = []
-
-    for i, file in enumerate(files):
-        print("Read file ", i, " of ", n)
-        ds = xr.open_dataset(file)
-        ds_resamp = resample_mwr_ds_on_scan_freq(ds)
-        ds_list.append(ds_resamp)
-
-    # Fix 1 — alle time-Koordinaten auf ns casten vor dem concat:
-    ds_list = [ds.assign_coords(time=ds["time"].astype("datetime64[ns]"))
-               for ds in ds_list]
-    ds_joy = xr.concat(ds_list, dim="time")
-
-    print(ds_joy)
-    print(ds_joy["time"])
-
-    ds_joy.to_netcdf(args.outfile)#, format="NETCDF4_CLASSIC")
-'''
-
 # Claude variant against RAM shortage:
 if __name__ == "__main__":
     args = parse_arguments()
@@ -330,6 +328,21 @@ if __name__ == "__main__":
         print(f"Read file {i} of {n}")
         ds = xr.open_dataset(file)
         ds_resamp = resample_mwr_ds_on_scan_freq(ds)
+
+        ###########
+        # Break here when working on timeslice detection:
+        # break
+        ###########
+
+        ###
+        # Leave out empty datasets:
+        if ds_resamp.sizes["time"] == 0:
+            print(f"  → no valid scans in file {i} — skipping")
+            ds.close()
+            ds_resamp.close()
+            continue
+        ###
+
         ds_resamp = ds_resamp.assign_coords(
             time=ds_resamp["time"].astype("datetime64[ns]"))
 
@@ -342,7 +355,8 @@ if __name__ == "__main__":
 
     # Am Ende lazy einlesen und zusammenfügen:
     print("Concatenating...")
-    ds_final = xr.open_mfdataset(tmp_files, combine="by_coords")
+    # ds_final = xr.open_mfdataset(tmp_files, combine="by_coords")
+    ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
     ds_final.to_netcdf(args.outfile)
 
     # Temp-Dateien aufräumen:

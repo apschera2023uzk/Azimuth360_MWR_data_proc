@@ -29,6 +29,13 @@ first_col = np.arange(0, 360, 5)
 second_col = (first_col + 180) % 360
 azi_pairs = np.column_stack([first_col, second_col])
 n_sigmas_rfi = 1.3
+vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc")]
 
 ##############################################################################
 # 3rd Argparse
@@ -38,12 +45,20 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="This script finds obstacles at different Azimuths and elevations."
     )
+    '''
     parser.add_argument(
         "--infile", "-i",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         help="Input NetCDF file which is already resampled to scan frequency."
     )
+    '''
     # ./derive_angle_and_direction_of_tilt.py --infile /home/aki/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc
     parser.add_argument(
         "--rttov", "-rt",
@@ -183,7 +198,6 @@ def get_TBref4elev(args, elevation=30, model="RTTOV-gb"):
                 zenith_angle=(90-elevation), clear_sky_bool=True)
 
         # After loops - save results:
-        dir_name = os.path.dirname(args.infile)
         outfile = os.path.expanduser("~/prof_plev.dat")
         out = open(outfile, "w")
         out.write(profile1)
@@ -225,6 +239,16 @@ def determine_obstacle_probability(ds, i_elev,
     tb_mean = np.nanmean(tb, axis=0)   # (azimuth, N_Channels)
     tb_std  = np.nanstd(tb,  axis=0)   # (azimuth, N_Channels)
 
+    '''
+    #################################
+    print("tb: ", tb)
+    print("tb shape: ", np.shape(tb))
+    print("np.nanmean(tb, axis=0) shape: ", np.shape(np.nanmean(tb, axis=0)))
+    print("ref_min: ", ref_min) # NAN!
+    print("tb_mean: ", tb_mean) # NAN!
+    ##############################
+    '''
+
     overmin_azi = tb_mean - ref_min[np.newaxis, :]          # (azimuth, N_Channels)
     overmod_azi = tb_mean - tbs_mod[np.newaxis, :]          # (azimuth, N_Channels)
     azi_stds    = tb_std                                     # (azimuth, N_Channels)
@@ -251,9 +275,9 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
                  fontsize=14, fontweight="bold")
 
     plots = [
-        (axes[0, 0], overmin_2d,        "Deviation from min TB mean [K]",   "RdYlGn_r", None, None),
-        (axes[0, 1], overmod_2d,        "Deviation from RTTOV model [K]",   "RdYlGn_r", None, None),
-        (axes[1, 0], std_2d,            "Temporal std of TB [K]",            "viridis",   0,    None),
+        (axes[0, 0], overmin_2d,        "Deviation from min TB mean [K]",   "RdYlGn_r", 0, 100),
+        (axes[0, 1], overmod_2d,        "Deviation from RTTOV model [K]",   "bwr", -80, 80),
+        (axes[1, 0], std_2d,            "Temporal std of TB [K]",            "viridis",   0,    40),
         (axes[1, 1], flag_2d.astype(float), "Obstacle flag (1=obstacle)",    "Reds",      0,    1),
     ]
 
@@ -269,7 +293,7 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
         ax.set_yticks(elevations)
 
     plt.tight_layout()
-    plt.savefig(outpath+"obstacle_plot.png", dpi=200, bbox_inches="tight")
+    plt.savefig(outpath+f"obstacle_plot_{tag}.png", dpi=200, bbox_inches="tight")
     plt.close()
 
 ##############################################################################
@@ -278,70 +302,104 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
 
 if __name__=="__main__":    
     args = parse_arguments()
-    ds0 = xr.open_dataset(args.infile)
 
-    # Exclude clouds:
-    ds = clear_dataset(ds0)
+    # To process other inputs replace site file and loop with args.infile...
 
-    ###
-    # RFI should probably be excluded first...
-    ###
+    for site_file in vitII:
 
-    # Go through elevations: 
-    overmin_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
-    overmod_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
-    std_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
-    obstacle_flag = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan) 
-    for i_elev, ele in enumerate(ds["elevation"].values):
-        print(i_elev, ele)
-        tbs_mod = get_TBref4elev(args,elevation=ele, model="RTTOV-gb")
-        overmin_azi, overmod_azi, azi_stds = determine_obstacle_probability(\
-                    ds, i_elev, tbs_mod=tbs_mod)
-        # Save results:
-        overmin_ele_azi[i_elev, :,:] = overmin_azi
-        overmod_ele_azi[i_elev, :,:] = overmod_azi
-        std_ele_azi[i_elev, :,:] = azi_stds
+        ds0 = xr.open_dataset(site_file)
 
-        # Calculate thresholds:
-        sigma_of_mins = np.nanstd(np.nanmean(overmin_azi[:,1:7], axis=1))
-        mean_of_mins = np.nanmean(np.nanmean(overmin_azi[:,1:7], axis=1))
-        threshold_min = mean_of_mins+sigma_of_mins
-        sigma_of_mods = np.nanstd(np.nanmean(overmod_azi[:,1:7], axis=1))
-        mean_of_mods = np.nanmean(np.nanmean(overmod_azi[:,1:7], axis=1))
-        threshold_mod = mean_of_mods+sigma_of_mods
-        sigma_of_sigmas = np.nanstd(np.nanmean(azi_stds[:,1:7], axis=1))
-        mean_of_sigmas = np.nanmean(np.nanmean(azi_stds[:,1:7], axis=1))
-        threshold_sig = mean_of_sigmas-sigma_of_sigmas
+        ##############################
+        # What goes wrong, when excluding clouds???
 
-        # 1st Write a flag into an array
-        obstacle_flag[i_elev, :, :] = np.where(
-            (overmin_azi > threshold_min) &
-            (overmod_azi > threshold_mod) &
-            (azi_stds    < threshold_sig),
-            1, 0
-        )
+        # print("Before clearing: ", ds0["tb"])
 
-    ##########################
-    ####
-    # 2nd create colorplots of stds; overshots and flag
-    # After elevation loop:
-        plot_obstacle_overview(
-            overmin_ele_azi, overmod_ele_azi, std_ele_azi,
-            obstacle_flag,
-            azimuth=ds["azimuth"].values,
-            elevations=ds["elevation"].values,
-            tag=os.path.basename(args.infile).split(".")[0]
-        )
+        # Exclude clouds:
+        # ds = clear_dataset(ds0)
+        ds = ds0
 
-        ########
-        # 3rd Write obstacles flag into input file!!! # You could use that later in tilt derival...
+        # print("After clearing: ", ds["tb"])
 
 
-    #############
-    # Optional:
-    # Checke aussortierenden Algorithmus für Liquid und cloud....
-    # Kommt bei Tophat shcon aus resample script nicht mit...
-    # Zunächst prozentuale Wahrscheinlichkeit...
+        ###
+        # RFI should probably be excluded first...
+        ###
+        ##############################
+
+        # Go through elevations: 
+        overmin_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
+        overmod_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
+        std_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
+        obstacle_flag = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan) 
+        for i_elev, ele in enumerate(ds["elevation"].values):
+            print(i_elev, ele)
+            tbs_mod = get_TBref4elev(args,elevation=ele, model="RTTOV-gb")
+            overmin_azi, overmod_azi, azi_stds = determine_obstacle_probability(\
+                        ds, i_elev, tbs_mod=tbs_mod)
+            ###########
+            # break
+            ##########
+
+            # Save results:
+            overmin_ele_azi[i_elev, :,:] = overmin_azi
+            overmod_ele_azi[i_elev, :,:] = overmod_azi
+            std_ele_azi[i_elev, :,:] = azi_stds
+
+            #################################
+            # print("tbs_mod: ",tbs_mod[0:5])
+            # print("overmin_azi",overmin_azi[0:5])
+            # print("overmod_azi: ", overmod_azi[0:5])
+            # Model data does not cause any problems!
+            # Only overmin contains too many NaNs!!!
+            # break
+            ##############################
+
+            # Calculate thresholds:
+            sigma_of_mins = np.nanstd(np.nanmean(overmin_azi[:,1:7], axis=1))
+            mean_of_mins = np.nanmean(np.nanmean(overmin_azi[:,1:7], axis=1))
+            threshold_min = mean_of_mins+sigma_of_mins*1.3
+            sigma_of_mods = np.nanstd(np.nanmean(overmod_azi[:,1:7], axis=1))
+            mean_of_mods = np.nanmean(np.nanmean(overmod_azi[:,1:7], axis=1))
+            threshold_mod = mean_of_mods+sigma_of_mods*1.3
+            
+            ###########
+            sigma_of_sigmas = np.nanstd(np.nanmean(azi_stds[:,1:7], axis=1))
+            mean_of_sigmas = np.nanmean(np.nanmean(azi_stds[:,1:7], axis=1))
+            threshold_sig = mean_of_sigmas-sigma_of_sigmas*0.5
+            ########
+
+            # 1st Write a flag into an array
+            obstacle_flag[i_elev, :, :] = np.where(
+                (overmin_azi > threshold_min) &
+                (overmod_azi > threshold_mod), 
+                    #&
+                #(azi_stds    < threshold_sig),
+                1, 0
+            )
+            
+            # print("obstacle_flag: ", obstacle_flag)
+
+        ##########################
+        ####
+        # 2nd create colorplots of stds; overshots and flag
+        # After elevation loop:
+            plot_obstacle_overview(
+                overmin_ele_azi, overmod_ele_azi, std_ele_azi,
+                obstacle_flag,
+                azimuth=ds["azimuth"].values,
+                elevations=ds["elevation"].values,
+                tag=os.path.basename(site_file).split(".")[0]
+            )
+
+            ########
+            # 3rd Write obstacles flag into input file!!! # You could use that later in tilt derival...
+
+
+        #############
+        # Optional:
+        # Checke aussortierenden Algorithmus für Liquid und cloud....
+        # Kommt bei Tophat shcon aus resample script nicht mit...
+        # Zunächst prozentuale Wahrscheinlichkeit...
 
 
 

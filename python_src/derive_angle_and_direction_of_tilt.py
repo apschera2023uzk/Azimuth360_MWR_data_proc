@@ -41,7 +41,13 @@ def parse_arguments():
     parser.add_argument(
         "--infile", "-i",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         help="Input NetCDF file which is already resampled to scan frequency."
     )
     # ./derive_angle_and_direction_of_tilt.py --infile /home/aki/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc
@@ -481,11 +487,12 @@ def derive_rfi_angles(ds, i_elev=0, n_sigmas_rfi=n_sigmas_rfi):
 
 ##############################################################################
 
-def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,
-                         save_path=os.path.expanduser("~/tilt_plot.png")):
+def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
+        save_path=os.path.expanduser("~/tilt_plot_"),tag="", elevation=90):
 
     grad  = azis
     theta = np.deg2rad(grad)
+    short_tag = tag.split(".")[0]
 
     # ── Style ────────────────────────────────────────────────────────────────
     plt.rcParams.update({
@@ -531,7 +538,7 @@ def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,
 
     # ── Annotations ──────────────────────────────────────────────────────────
     ax.set_title(
-        f"Azimuthal brightness temperature differences and estimated instrument tilt\n"
+        f"Azimuthal brightness temperature differences and estimated instrument tilt ({short_tag} / elevation: {elevation}°)\n"
         f"Tilt magnitude: {tilt:.2f}°   |   "
         f"Identified tilt angles: {angle_pair[0]:.0f}° (high) to {angle_pair[1]:.0f}° (low) | Tilt axes: {(angle_pair[0]+90)%360}° - {(angle_pair[1]+90)%360}°",
         fontsize=13, pad=12, loc="left"
@@ -544,9 +551,9 @@ def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,
         ax.axvline(ang, color="#c0392b", lw=0.8, ls=":", alpha=0.6)
 
     fig.tight_layout()
-    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    fig.savefig(save_path+short_tag+".png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved: {save_path}")
+    print(f"Saved: {save_path}"+short_tag+".png")
 
 ##############################################################################
 # 5th Main code:
@@ -557,8 +564,12 @@ if __name__=="__main__":
     ds0 = xr.open_dataset(args.infile)
     i_elev=0 # 30 ° Elevation!
 
+    tag=(args.infile).split("/")[-1]
+    short_tag = tag.split(".")[0]
+
     # Exclude clouds & RFI:
-    ds = clear_dataset(ds0)
+    # ds = clear_dataset(ds0)
+    ds = ds0
     n_before = int(np.sum(~np.isnan(ds.isel(elevation=i_elev)["tb"].values)))
     rfi_mask_da = derive_rfi_angles(ds)
     ds["tb"] = ds["tb"].where(rfi_mask_da)    
@@ -569,7 +580,8 @@ if __name__=="__main__":
 
     ####
     # Create a comparison plot: => def function
-    plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair)
+    plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
+        tag=tag, elevation=elevation)
     '''
     grad = azis
     theta = np.deg2rad(grad)  # Grad → Radiant
@@ -595,7 +607,7 @@ if __name__=="__main__":
 
     ####
     # Datafile: => def function
-    with open(os.path.expanduser("~/tilt_detection.txt"), "w") as f:
+    with open(os.path.expanduser("~/tilt_detection_"+short_tag+".txt"), "w") as f:
         f.writelines("Tilt: "+str(tilt)+"°\n") 
         f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
         f.writelines(f"\nDatenpunkte: vorher={n_before}, nachher={n_total}, "
@@ -608,6 +620,8 @@ if __name__=="__main__":
         f.writelines(f"\nRFI assumed by more than {n_sigmas_rfi} sigmas of scan.")
 
     #################
+
+    # I probably should exclude obstacles!!!
 
     # Tilt timeseries!!!
 
