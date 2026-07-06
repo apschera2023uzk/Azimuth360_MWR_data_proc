@@ -581,7 +581,7 @@ if __name__=="__main__":
     ####
     # Create a comparison plot: => def function
     plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
-        tag=tag, elevation=elevation)
+        tag=tag, elevation=ds["elevation"].values[i_elev])
     '''
     grad = azis
     theta = np.deg2rad(grad)  # Grad → Radiant

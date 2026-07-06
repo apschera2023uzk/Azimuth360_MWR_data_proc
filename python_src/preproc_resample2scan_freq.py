@@ -9,11 +9,15 @@ import glob
 import numpy as np
 import argparse
 import os
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import matplotlib
 
 ##############################################################################
 # 2nd Params:
 ##############################################################################
 
+matplotlib.use("Agg")
 max_elev_azi_diff = 0.05 #°
 azimuths = np.arange(0.,355.1,5.) # Interpolate between these!
 elevations = np.array([90, 70, 50,45,40,35, 30, 25, 20, 19.2, 15, 14.4, 11.4, 10, 8.4,  6.6,\
@@ -37,7 +41,8 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/*/MWR_1C01_sinthern_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
         help="Pattern of MWR output files with TBs of scans."
     )
     parser.add_argument(
@@ -49,7 +54,8 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
         help="NetCDF Output file path."
     )
     return parser.parse_args()
@@ -293,6 +299,219 @@ def create_scan_ds(time_array, tbs, flags, rainfall, elevations=elevations,\
 
 ###############################################################################
 
+def determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
+                                tb_var="tb", ele_var="ele", azi_var="azi",\
+                                elevations=elevations, azimuths=azimuths):
+    
+    # Create empty TB array with dims: (time,elev,azi,ch)
+    tbs = np.full((len(BL_time_indices_list_list),len(elevations),\
+                   14), np.nan)
+    flags = np.full(len(BL_time_indices_list_list), -2147483647, dtype=int)
+    rainfall = np.full(len(BL_time_indices_list_list), np.nan, dtype=float)
+    time_array = []
+    
+    # All scans within MWR file:
+    for i, timeslice in enumerate(BL_time_indices_list_list):
+
+        ####
+        # Only for Jülich / Vital I:
+        if ele_var == "elevation_angle": 
+
+            # Flag: nimm den häufigsten Wert im Timeslice (Mode)
+            flag_vals = ds_old["liquid_cloud_flag"].values[timeslice]
+            flag_vals_valid = flag_vals[flag_vals != -2147483647]
+
+            if len(flag_vals_valid) > 0:
+                if 1 in flag_vals_valid:
+                    flags[i] = 1   # cloudy dominiert
+                elif 2 in flag_vals_valid:
+                    flags[i] = 2   # undefined
+                else:
+                    flags[i] = 0   # nur dann clear
+
+            # Rainrate:
+            rain_vals = ds_old["rainfall_rate"].values[timeslice]
+            fill = 9.96921e+36
+            rain_vals_valid = rain_vals[rain_vals != fill]
+            if len(rain_vals_valid) > 0:
+                rainfall[i] = np.nanmean(rain_vals_valid)
+
+        ###
+        # Only for FESSTVaL Foghat / RAO:
+        else:
+            # Bitwise OR: wenn irgendein Zeitschritt ein Bit hat, bleibt es gesetzt
+            flag_vals = ds_old["flag"].values[timeslice]
+            fill = 0  # _FillValue ist 0s
+
+            ###########################
+            # Alternate Nan-Filter:
+            # flag_vals_valid = flag_vals[flag_vals != fill].astype(int)
+            flag_vals_valid = flag_vals[~np.isnan(flag_vals) & (flag_vals != fill)].astype(int)
+            ########################
+
+            if len(flag_vals_valid) > 0:
+                combined = 0
+                for fv in flag_vals_valid:
+                    combined |= int(fv)
+                flags[i] = combined
+            else:
+                flags[i] = 0  # kein gültiger Wert → kein Flag
+
+        ####
+        # Always:
+        # Average of time over timeslice:
+        times = ds_old["time"].values[timeslice]
+        times_ns = times.astype("int64")  
+        mean_ns  = np.nanmean(times_ns)
+        mean_time = mean_ns.astype("datetime64[ns]")
+        time_array.append(mean_time)
+        
+        # Check one scan of MWR in:
+        for j in timeslice:
+            k = np.nanargmin(np.abs(elevations-ds_old[ele_var].values[j]))
+            # m = np.nanargmin(np.abs(azimuths-ds_old[azi_var].values[j]))
+            tbs[i, k, :] = ds_old[tb_var].values[j, :]
+
+    # plt.figure()
+    # plt.pcolormesh(time_array, elevations, tbs[:,:,0].T)
+    # plt.savefig("test_BL.png")
+
+    return time_array, tbs, flags, rainfall
+
+###############################################################################
+
+def create_BL_ds(ds_old, time_array, tbs, flags, rainfall,
+                 elevations=elevations,
+                 ele_var="ele",
+                 tb_var="tb",
+                 out_file=None):
+    """
+    Creates an xarray Dataset for Boundary Layer scans (varying elevation,
+    fixed azimuth ~0°/North) and optionally saves it to NetCDF.
+
+    Parameters
+    ----------
+    ds_old      : xr.Dataset   — original input dataset (for metadata/coords)
+    time_array  : list         — mean datetime64 per scan
+    tbs         : np.ndarray   — shape (n_scans, n_elevations, 14)
+    flags       : np.ndarray   — shape (n_scans,) int cloud/quality flag
+    rainfall    : np.ndarray   — shape (n_scans,) float rainfall rate
+    elevations  : np.ndarray   — elevation angles used as coordinate
+    ele_var     : str          — name of elevation variable in ds_old
+    tb_var      : str          — name of TB variable in ds_old
+    out_file    : str or None  — path to output NetCDF (None = don't save)
+
+    Returns
+    -------
+    ds_bl : xr.Dataset
+    """
+
+    time_array = np.array(time_array, dtype="datetime64[ns]")
+    n_time, n_ele, n_chan = tbs.shape
+
+    # ── Frequency coordinate from original dataset ────────────────────────────
+    if "frequency" in ds_old.coords:
+        freqs = ds_old["frequency"].values
+    elif "n_freq" in ds_old.dims:
+        freqs = np.arange(n_chan, dtype=float)
+    else:
+        freqs = np.arange(n_chan, dtype=float)
+
+    # ── Latitude / Longitude / Altitude scalars from original ─────────────────
+    def scalar(var):
+        if var in ds_old:
+            v = ds_old[var].values.flat[0]
+            return float(v) if not np.isnan(float(v)) else np.nan
+        return np.nan
+
+    lat = scalar("latitude")
+    lon = scalar("longitude")
+    alt = scalar("altitude")
+
+    # ── Build Dataset ─────────────────────────────────────────────────────────
+    ds_bl = xr.Dataset(
+        data_vars={
+            # TBs: (time, elevation, frequency)
+            "tb": xr.DataArray(
+                tbs.astype(np.float32),
+                dims=["time", "elevation", "frequency"],
+                attrs={
+                    "units"    : "K",
+                    "long_name": "Microwave brightness temperature",
+                    "standard_name": "brightness_temperature",
+                }
+            ),
+            # Cloud / quality flag: (time,)
+            "liquid_cloud_flag": xr.DataArray(
+                flags.astype(np.int32),
+                dims=["time"],
+                attrs={
+                    "long_name"   : "Liquid cloud flag",
+                    "flag_values" : "0 1 2",
+                    "flag_meanings": "clear cloudy undefined",
+                    "_FillValue"  : -2147483647,
+                }
+            ),
+            # Rainfall rate: (time,)
+            "rainfall_rate": xr.DataArray(
+                rainfall.astype(np.float32),
+                dims=["time"],
+                attrs={
+                    "units"    : "mm/h",
+                    "long_name": "Rainfall rate",
+                }
+            ),
+            # Azimuth: constant 0° (North) for all BL scans
+            "azimuth_angle": xr.DataArray(
+                np.zeros(n_time, dtype=np.float32),
+                dims=["time"],
+                attrs={
+                    "units"    : "degrees",
+                    "long_name": "Azimuth angle (fixed North for BL scans)",
+                }
+            ),
+            # Static scalars:
+            "latitude": xr.DataArray(
+                np.full(n_time, lat, dtype=np.float32), dims=["time"],
+                attrs={"units": "degrees_north", "long_name": "Latitude"}
+            ),
+            "longitude": xr.DataArray(
+                np.full(n_time, lon, dtype=np.float32), dims=["time"],
+                attrs={"units": "degrees_east", "long_name": "Longitude"}
+            ),
+            "altitude": xr.DataArray(
+                np.full(n_time, alt, dtype=np.float32), dims=["time"],
+                attrs={"units": "m", "long_name": "Altitude above sea level"}
+            ),
+        },
+        coords={
+            "time"     : ("time",      time_array),
+            "elevation": ("elevation", elevations.astype(np.float32),
+                          {"units": "degrees", "long_name": "Elevation angle"}),
+            "frequency": ("frequency", freqs.astype(np.float32),
+                          {"units": "GHz", "long_name": "Frequency"}),
+        },
+        attrs={
+            "title"      : "MWR Boundary Layer elevation scans",
+            "institution": ds_old.attrs.get("institution", ""),
+            "source"     : ds_old.attrs.get("source", ""),
+            "scan_type"  : "BL_elevation_scan",
+            "azimuth_fixed_deg": "0.0 (North)",
+            "history"    : f"Created by preproc_resample2scan_freq.py",
+            "Conventions": "CF-1.8",
+        }
+    )
+
+    # ── Save to NetCDF ────────────────────────────────────────────────────────
+    if out_file is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
+        ds_bl.to_netcdf(out_file)
+        print(f"  Saved BL dataset: {out_file}")
+
+    return ds_bl
+
+###############################################################################
+
 def resample_mwr_ds_on_scan_freq(ds_old):
     
     # 0th Determine azi, ele and tb vars:
@@ -306,17 +525,25 @@ def resample_mwr_ds_on_scan_freq(ds_old):
     time_array, tbs, flags, rainfall = determine_data_in_time_for_scanset(ds_old,\
             time_indices_list_list, tb_var=tb_var, ele_var=ele_var,\
             azi_var=azi_var)
+    time_array_bl, tbs_bl, flags_bl, rainfall_bl =\
+            determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
+            tb_var=tb_var, ele_var=ele_var, azi_var=azi_var)
 
     # 3rd Create new dataset of scans:
     ds_new = create_scan_ds(time_array, tbs, flags, rainfall, elevations=elevations,\
             azimuths=azimuths, ele_var=ele_var, tb_var=tb_var, azi_var=azi_var)
+    ds_bl = create_BL_ds(ds_old,time_array_bl, tbs_bl, flags_bl, rainfall_bl,
+                 elevations=elevations,
+                 ele_var=ele_var,
+                 tb_var=tb_var,
+                 out_file=None)
 
-    return ds_new
+    return ds_new, ds_bl
 
 ##############################################################################
 # 5th Main code:
 ##############################################################################
-
+'''
 # Claude variant against RAM shortage:
 if __name__ == "__main__":
     args = parse_arguments()
@@ -327,7 +554,7 @@ if __name__ == "__main__":
     for i, file in enumerate(files):
         print(f"Read file {i} of {n}")
         ds = xr.open_dataset(file)
-        ds_resamp = resample_mwr_ds_on_scan_freq(ds)
+        ds_resamp, ds_bl = resample_mwr_ds_on_scan_freq(ds)
 
         ###########
         # Break here when working on timeslice detection:
@@ -364,6 +591,67 @@ if __name__ == "__main__":
         os.remove(tmp)
 
     print("Done:", args.outfile)
+'''
+if __name__ == "__main__":
+    args = parse_arguments()
+    files = sorted(glob.glob(args.in_pattern))
+    n = len(files)
+    tmp_files    = []
+    tmp_files_bl = []
+
+    for i, file in enumerate(files):
+        print(f"Read file {i} of {n}")
+        ds = xr.open_dataset(file)
+        ds_resamp, ds_bl = resample_mwr_ds_on_scan_freq(ds)
+
+        # ── Azimuth scan dataset ──────────────────────────────────────────────
+        if ds_resamp.sizes["time"] == 0:
+            print(f"  → no valid azimuth scans in file {i} — skipping")
+        else:
+            ds_resamp = ds_resamp.assign_coords(
+                time=ds_resamp["time"].astype("datetime64[ns]"))
+            tmp_path = args.outfile + f".tmp_{i:04d}.nc"
+            ds_resamp.to_netcdf(tmp_path)
+            tmp_files.append(tmp_path)
+            ds_resamp.close()
+
+        # ── BL scan dataset ───────────────────────────────────────────────────
+        if ds_bl is None or ds_bl.sizes["time"] == 0:
+            print(f"  → no valid BL scans in file {i} — skipping")
+        else:
+            ds_bl = ds_bl.assign_coords(
+                time=ds_bl["time"].astype("datetime64[ns]"))
+            tmp_path_bl = args.outfile + f".tmp_bl_{i:04d}.nc"
+            ds_bl.to_netcdf(tmp_path_bl)
+            tmp_files_bl.append(tmp_path_bl)
+            ds_bl.close()
+
+        ds.close()
+
+    # ── Concatenate azimuth scans ─────────────────────────────────────────────
+    if tmp_files:
+        print("Concatenating azimuth scans...")
+        ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
+        ds_final.to_netcdf(args.outfile)
+        ds_final.close()
+        for tmp in tmp_files:
+            os.remove(tmp)
+        print("Done:", args.outfile)
+    else:
+        print("No azimuth scan data to write.")
+
+    # ── Concatenate BL scans ──────────────────────────────────────────────────
+    if tmp_files_bl:
+        outfile_bl = args.outfile.replace(".nc", "_BL.nc")
+        print("Concatenating BL scans...")
+        ds_final_bl = xr.open_mfdataset(tmp_files_bl, combine="nested", concat_dim="time")
+        ds_final_bl.to_netcdf(outfile_bl)
+        ds_final_bl.close()
+        for tmp in tmp_files_bl:
+            os.remove(tmp)
+        print("Done:", outfile_bl)
+    else:
+        print("No BL scan data to write.")
 
 
 ###################################################

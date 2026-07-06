@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import matplotlib.ticker as ticker
 import matplotlib
+import gc
 
 ##############################################################################
 # 2nd Params:
@@ -29,14 +30,28 @@ first_col = np.arange(0, 360, 5)
 second_col = (first_col + 180) % 360
 azi_pairs = np.column_stack([first_col, second_col])
 n_sigmas_rfi = 1.3
+lowest_pos_sigma = 2.5 # add 2. nearly all wrong detection in tophat vanished; at 2.5 all!
+min_std_fac = 1.
+mod_std_fac = 1.5
+sigsig_fac = 3.
+lowest_pos_sigsig = 20.
+
+
+
 vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),\
-    os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),\
-    os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc")]
-
+    # os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),\
+    os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc")]
+'''
+vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc")]
+# vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc")]
+# vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc")]
+# vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc")]
+'''
 ##############################################################################
 # 3rd Argparse
 ##############################################################################
@@ -239,21 +254,18 @@ def determine_obstacle_probability(ds, i_elev,
     tb_mean = np.nanmean(tb, axis=0)   # (azimuth, N_Channels)
     tb_std  = np.nanstd(tb,  axis=0)   # (azimuth, N_Channels)
 
-    '''
-    #################################
-    print("tb: ", tb)
-    print("tb shape: ", np.shape(tb))
-    print("np.nanmean(tb, axis=0) shape: ", np.shape(np.nanmean(tb, axis=0)))
-    print("ref_min: ", ref_min) # NAN!
-    print("tb_mean: ", tb_mean) # NAN!
-    ##############################
-    '''
-
     overmin_azi = tb_mean - ref_min[np.newaxis, :]          # (azimuth, N_Channels)
     overmod_azi = tb_mean - tbs_mod[np.newaxis, :]          # (azimuth, N_Channels)
     azi_stds    = tb_std                                     # (azimuth, N_Channels)
+    p90_min = np.nanpercentile(overmin_azi, 90)
+    p90_mod = np.nanpercentile(overmod_azi, 90)
+    p90_std = np.nanpercentile(azi_stds, 90)
+    p10_min = np.nanpercentile(overmin_azi, 10)
+    p10_mod = np.nanpercentile(overmod_azi, 10)
+    p10_std = np.nanpercentile(azi_stds, 10)
 
-    return overmin_azi, overmod_azi, azi_stds
+
+    return overmin_azi, overmod_azi, azi_stds, p90_min, p90_mod, p90_std, p10_std
 
 ##############################################################################
 
@@ -307,93 +319,107 @@ if __name__=="__main__":
 
     for site_file in vitII:
 
-        ds0 = xr.open_dataset(site_file)
-
-        ##############################
-        # What goes wrong, when excluding clouds???
-
-        # print("Before clearing: ", ds0["tb"])
-
-        # Exclude clouds:
-        # ds = clear_dataset(ds0)
-        ds = ds0
-
-        # print("After clearing: ", ds["tb"])
-
-
-        ###
-        # RFI should probably be excluded first...
-        ###
-        ##############################
-
-        # Go through elevations: 
+        ds = xr.open_dataset(site_file, mask_and_scale=False)
         overmin_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
         overmod_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
         std_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
         obstacle_flag = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan) 
+
+        # Calculate model TBs by elevation:
+        tbs_mod_cache = {}
+        for ele in ds["elevation"].values:
+            tbs_mod_cache[ele] = get_TBref4elev(args, elevation=ele, model="RTTOV-gb")
+
+        ################
+        # LOOP BY ELEVS STARTS:
         for i_elev, ele in enumerate(ds["elevation"].values):
+            print("*****")
             print(i_elev, ele)
-            tbs_mod = get_TBref4elev(args,elevation=ele, model="RTTOV-gb")
-            overmin_azi, overmod_azi, azi_stds = determine_obstacle_probability(\
-                        ds, i_elev, tbs_mod=tbs_mod)
-            ###########
-            # break
-            ##########
+
+            tbs_mod = tbs_mod_cache[ele]
+            overmin_azi, overmod_azi, azi_stds, p90_min, p90_mod, p90_std, p10_std =\
+                determine_obstacle_probability(\
+                    ds, i_elev, tbs_mod=tbs_mod)
 
             # Save results:
             overmin_ele_azi[i_elev, :,:] = overmin_azi
             overmod_ele_azi[i_elev, :,:] = overmod_azi
             std_ele_azi[i_elev, :,:] = azi_stds
 
-            #################################
-            # print("tbs_mod: ",tbs_mod[0:5])
-            # print("overmin_azi",overmin_azi[0:5])
-            # print("overmod_azi: ", overmod_azi[0:5])
-            # Model data does not cause any problems!
-            # Only overmin contains too many NaNs!!!
-            # break
-            ##############################
-
             # Calculate thresholds:
             sigma_of_mins = np.nanstd(np.nanmean(overmin_azi[:,1:7], axis=1))
             mean_of_mins = np.nanmean(np.nanmean(overmin_azi[:,1:7], axis=1))
-            threshold_min = mean_of_mins+sigma_of_mins*1.3
+            threshold_min = max(mean_of_mins+sigma_of_mins*min_std_fac, mean_of_mins+lowest_pos_sigma)
             sigma_of_mods = np.nanstd(np.nanmean(overmod_azi[:,1:7], axis=1))
             mean_of_mods = np.nanmean(np.nanmean(overmod_azi[:,1:7], axis=1))
-            threshold_mod = mean_of_mods+sigma_of_mods*1.3
-            
-            ###########
+            threshold_mod = mean_of_mods+sigma_of_mods*mod_std_fac
             sigma_of_sigmas = np.nanstd(np.nanmean(azi_stds[:,1:7], axis=1))
             mean_of_sigmas = np.nanmean(np.nanmean(azi_stds[:,1:7], axis=1))
-            threshold_sig = mean_of_sigmas-sigma_of_sigmas*0.5
-            ########
+            threshold_sig = min(mean_of_sigmas-sigma_of_sigmas*sigsig_fac,\
+                mean_of_mins-lowest_pos_sigsig )
+            threshold_sig_high = max(mean_of_sigmas+sigma_of_sigmas*sigsig_fac,\
+                mean_of_mins+lowest_pos_sigsig )
 
+            # New thresholds:
+            thrs_min = max(p90_min, mean_of_mins+lowest_pos_sigma)
+            thrs_mod = max(p90_mod, mean_of_mods+lowest_pos_sigma)
+            thrs_std_hgh = max(p90_std, mean_of_sigmas+lowest_pos_sigsig)
+            thrs_std_low = min(p10_std, mean_of_sigmas-lowest_pos_sigsig/4)
+
+            #################################
             # 1st Write a flag into an array
+            '''
+            obstacle_flag[i_elev, :, :] = np.where(
+                (azi_stds    < thrs_std_low),
+                1, 0
+            )
+            '''
+
             obstacle_flag[i_elev, :, :] = np.where(
                 (overmin_azi > threshold_min) &
-                (overmod_azi > threshold_mod), 
-                    #&
-                #(azi_stds    < threshold_sig),
+                (overmod_azi > threshold_mod), # |
+                # (azi_stds    < thrs_std_low) | 
+                # (azi_stds > thrs_std_hgh),
                 1, 0
             )
             
-            # print("obstacle_flag: ", obstacle_flag)
+            
+            # Last time I was busy here...
+            # For airport data somehow all three flags work fine by themselves, but not together...
+            # Why???
+            #################
+        # LOOP BY ELEV ENDS
+        ###################
 
-        ##########################
         ####
         # 2nd create colorplots of stds; overshots and flag
-        # After elevation loop:
-            plot_obstacle_overview(
-                overmin_ele_azi, overmod_ele_azi, std_ele_azi,
-                obstacle_flag,
-                azimuth=ds["azimuth"].values,
-                elevations=ds["elevation"].values,
-                tag=os.path.basename(site_file).split(".")[0]
-            )
+        plot_obstacle_overview(
+            overmin_ele_azi, overmod_ele_azi, std_ele_azi,
+            obstacle_flag,
+            azimuth=ds["azimuth"].values,
+            elevations=ds["elevation"].values,
+            tag=os.path.basename(site_file).split(".")[0]
+        )       
 
-            ########
-            # 3rd Write obstacles flag into input file!!! # You could use that later in tilt derival...
+        ###
+        # 3rd Write obstacles flag into input file:
+        ds["obs_flag"] = xr.DataArray(
+            obstacle_flag,
+            dims=["elevation", "azimuth", "N_Channels"],
+            coords={
+                "elevation":  ds["elevation"],
+                "azimuth":    ds["azimuth"],
+                "N_Channels": ds["N_Channels"],
+            },
+            attrs={"long_name": "Obstacle flag", "units": "1",
+                   "comment": "1=obstacle detected, 0=clean"}
+        )
 
+        ds.to_netcdf(site_file.replace(".nc", "_obs.nc"))
+        ds.close()
+        del ds
+        del overmin_ele_azi, overmod_ele_azi, std_ele_azi, obstacle_flag
+        gc.collect()
 
         #############
         # Optional:
