@@ -37,7 +37,7 @@ sigsig_fac = 3.
 lowest_pos_sigsig = 20.
 
 
-
+'''
 vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),\
     os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),\
@@ -51,7 +51,8 @@ vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc")]
 # vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc")]
 # vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc")]
 # vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc")]
-'''
+vitII = [os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc")]
+
 ##############################################################################
 # 3rd Argparse
 ##############################################################################

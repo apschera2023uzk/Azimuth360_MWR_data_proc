@@ -34,7 +34,7 @@ def parse_arguments():
     parser.add_argument(
         "--in_pattern", "-i",
         type=str,
-        # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
+        default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
@@ -42,20 +42,22 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
-        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/mecken_jun26/MWR_1C01_*.nc"),
         help="Pattern of MWR output files with TBs of scans."
     )
     parser.add_argument(
         "--outfile", "-o",
         type=str,
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc"),
         help="NetCDF Output file path."
     )
     return parser.parse_args()
@@ -540,6 +542,19 @@ def resample_mwr_ds_on_scan_freq(ds_old):
 
     return ds_new, ds_bl
 
+###############################################################################
+
+def drop_allnan_time(ds, tb_var="tb"):
+    """Remove timesteps where the TB variable is entirely NaN."""
+    dims_to_check = [d for d in ds[tb_var].dims if d != "time"]
+    has_data = ~ds[tb_var].isnull().all(dim=dims_to_check)
+    n_before = ds.sizes["time"]
+    ds = ds.isel(time=has_data.values)
+    n_after = ds.sizes["time"]
+    print(f"  Dropped {n_before - n_after} all-NaN timesteps "
+          f"({n_before} → {n_after})")
+    return ds
+
 ##############################################################################
 # 5th Main code:
 ##############################################################################
@@ -632,6 +647,33 @@ if __name__ == "__main__":
     if tmp_files:
         print("Concatenating azimuth scans...")
         ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
+        ds_final = drop_allnan_time(ds_final, tb_var="tb")   # ← neu
+        ds_final.to_netcdf(args.outfile)
+        ds_final.close()
+        for tmp in tmp_files:
+            os.remove(tmp)
+        print("Done:", args.outfile)
+    else:
+        print("No azimuth scan data to write.")
+
+    # ── Concatenate BL scans ──────────────────────────────────────────────────
+    if tmp_files_bl:
+        outfile_bl = args.outfile.replace(".nc", "_BL.nc")
+        print("Concatenating BL scans...")
+        ds_final_bl = xr.open_mfdataset(tmp_files_bl, combine="nested", concat_dim="time")
+        ds_final_bl = drop_allnan_time(ds_final_bl, tb_var="tb")   # ← neu
+        ds_final_bl.to_netcdf(outfile_bl)
+        ds_final_bl.close()
+        for tmp in tmp_files_bl:
+            os.remove(tmp)
+        print("Done:", outfile_bl)
+    else:
+        print("No BL scan data to write.")
+    '''
+    # ── Concatenate azimuth scans ─────────────────────────────────────────────
+    if tmp_files:
+        print("Concatenating azimuth scans...")
+        ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
         ds_final.to_netcdf(args.outfile)
         ds_final.close()
         for tmp in tmp_files:
@@ -652,6 +694,7 @@ if __name__ == "__main__":
         print("Done:", outfile_bl)
     else:
         print("No BL scan data to write.")
+    '''
 
 
 ###################################################

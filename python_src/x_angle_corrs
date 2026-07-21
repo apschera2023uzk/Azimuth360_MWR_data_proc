@@ -1,0 +1,399 @@
+#! /usr/bin/env python3
+
+##############################################################################
+# 1st Necessary Modules
+##############################################################################
+
+import xarray as xr
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+import argparse
+import os
+import sys
+sys.path.append('/home/aki/pyrtlib')
+from pyrtlib.climatology import AtmosphericProfiles as atmp
+from pyrtlib.tb_spectrum import TbCloudRTE
+from pyrtlib.utils import ppmv2gkg, mr2rh
+import shutil
+import subprocess
+import matplotlib.ticker as ticker
+import matplotlib
+import pandas as pd
+
+##############################################################################
+# 2nd Params:
+##############################################################################
+
+matplotlib.use("Agg")
+first_col = np.arange(0, 360, 5)
+second_col = (first_col + 180) % 360
+azi_pairs = np.column_stack([first_col, second_col])
+n_sigmas_rfi = 1.3
+
+##############################################################################
+# 3rd Argparse
+##############################################################################
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="This script derives the instrument tilt and direction from a NetCDF file of TBs of 360° Azimuth scans at scan frequency."
+    )
+    parser.add_argument(
+        "--infile", "-i",
+        type=str,
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
+        help="Input NetCDF file which is already resampled to scan frequency."
+    )
+    # ./derive_angle_and_direction_of_tilt.py --infile /home/aki/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc
+    parser.add_argument(
+        "--rttov", "-rt",
+        type=str,
+        default=os.path.expanduser("~/RTTOV-gb"),
+        help="Runscript for RTTOV-gb."
+    )
+    return parser.parse_args()
+
+##############################################################################
+# 4th Functions
+##############################################################################
+
+def clausius_clapeyron_liq(temp_celsius):
+    # Sättigungsdampfdruck für eine Temperatur in °C
+    # es returned in Pa
+    # https://en.wikipedia.org/wiki/Latent_heat - enthalpiewerte
+    L = 2.5e6
+    esl = 610.78 * np.exp(L / 462 * (1/273.15 - 1/(273.15+temp_celsius)))
+    return esl
+
+###############################################################################
+
+def rh2ppmv(RH=70, abs_T=273.15+15, p=101325):
+    es = clausius_clapeyron_liq(abs_T-273.15)
+    e = es * RH / 100
+    ppmv = 1000000*e / p
+    return ppmv
+
+###############################################################################
+
+def clear_dataset(ds_in):
+    
+    n_time = ds_in.sizes["time"]
+    clear_mask = np.ones(n_time, dtype=bool)  # alle True = behalten
+
+    if "liquid_cloud_flag" in ds_in:
+        cf = ds_in["liquid_cloud_flag"].values
+        clear_mask &= (cf == 0)
+    else:
+        print("Info: liquid_cloud_flag nicht im Dataset — kein Cloud-Filter.")
+
+    if "rainfall_rate" in ds_in:
+        rr = ds_in["rainfall_rate"].values
+        fill = 9.96921e+36
+        rr_clean = np.where(np.abs(rr) >= fill, 0.0, rr)  # FillValue als 0 behandeln
+        clear_mask &= (rr_clean == 0)
+    else:
+        print("Info: rainfall_rate nicht im Dataset — kein Regen-Filter.")
+
+    n_clear = np.sum(clear_mask)
+    print(f"Zeitschritte gesamt: {n_time} | nach Filter: {n_clear} "
+          f"({100*n_clear/n_time:.1f}% behalten)")
+
+    ds_out = ds_in.isel(time=clear_mask)
+    return ds_out
+
+##############################################################################
+# 1a. Azimuth correlation matrix (per channel, at a fixed elevation)
+##############################################################################
+
+def get_azimuth_corr_matrices(ds, tb_var="tb", elevation=None, max_nan_frac=0.5):
+    """
+    For a single elevation, compute the (azimuth x azimuth) correlation
+    matrix separately per channel.
+
+    Returns
+    -------
+    azimuths  : 1D array of azimuth angles (deg)
+    corr_mats : array (N_Channels, n_azi, n_azi)
+    """
+    if elevation is None:
+        elevation = ds["elevation"].values[0]
+
+    ds_ele = ds.sel(elevation=elevation, method="nearest")
+    azimuths = ds_ele["azimuth"].values
+    n_azi = len(azimuths)
+    n_chan = ds_ele.sizes["N_Channels"]
+
+    corr_mats = np.full((n_chan, n_azi, n_azi), np.nan)
+
+    for ch in range(n_chan):
+        tb = ds_ele[tb_var].isel(N_Channels=ch).values  # (time, azimuth)
+        nan_frac = np.isnan(tb).mean(axis=0)
+        valid_cols = np.where(nan_frac < max_nan_frac)[0]
+        if valid_cols.size < 2:
+            continue
+        df = pd.DataFrame(tb[:, valid_cols])
+        corr = df.corr().values
+        for ii, i in enumerate(valid_cols):
+            for jj, j in enumerate(valid_cols):
+                corr_mats[ch, i, j] = corr[ii, jj]
+
+    return azimuths, corr_mats
+
+
+##############################################################################
+# 1b. Elevation correlation matrix (per channel, at a fixed azimuth)
+##############################################################################
+
+def get_elevation_corr_matrices(ds, tb_var="tb", azimuth=None, max_nan_frac=0.5):
+    """
+    For the mean azimuth, compute the (elevation x elevation) correlation
+    matrix separately per channel.
+
+    Returns
+    -------
+    elevations : 1D array of elevation angles (deg)
+    corr_mats  : array (N_Channels, n_ele, n_ele)
+    """
+    ds_azi = ds.mean(dim="azimuth")
+    elevations = ds_azi["elevation"].values
+    n_ele = len(elevations)
+    n_chan = ds_azi.sizes["N_Channels"]
+
+    corr_mats = np.full((n_chan, n_ele, n_ele), np.nan)
+
+    for ch in range(n_chan):
+        tb = ds_azi[tb_var].isel(N_Channels=ch).values  # (time, elevation)
+        nan_frac = np.isnan(tb).mean(axis=0)
+        valid_cols = np.where(nan_frac < max_nan_frac)[0]
+        if valid_cols.size < 2:
+            continue
+        df = pd.DataFrame(tb[:, valid_cols])
+        corr = df.corr().values
+        for ii, i in enumerate(valid_cols):
+            for jj, j in enumerate(valid_cols):
+                corr_mats[ch, i, j] = corr[ii, jj]
+
+    return elevations, corr_mats
+
+
+##############################################################################
+# 1c. Channel correlation matrix (per elevation, averaged over azimuth)
+##############################################################################
+
+def get_channel_corr_matrices(ds, tb_var="tb", max_nan_frac=0.5):
+    """
+    For each elevation, compute the (channel x channel) correlation matrix,
+    using all (time, azimuth) samples at that elevation as observations.
+
+    Returns
+    -------
+    elevations : 1D array of elevation angles (deg)
+    channels   : 1D array of channel numbers
+    corr_mats  : array (n_ele, N_Channels, N_Channels)
+    """
+    elevations = ds["elevation"].values
+    channels   = ds["N_Channels"].values
+    n_ele = len(elevations)
+    n_chan = len(channels)
+
+    corr_mats = np.full((n_ele, n_chan, n_chan), np.nan)
+
+    for ei, ele in enumerate(elevations):
+        # (time, azimuth, N_Channels) -> (time*azimuth, N_Channels)
+        tb = ds[tb_var].isel(elevation=ei).values
+        tb_flat = tb.reshape(-1, n_chan)
+
+        nan_frac = np.isnan(tb_flat).mean(axis=0)
+        valid_cols = np.where(nan_frac < max_nan_frac)[0]
+        if valid_cols.size < 2:
+            continue
+
+        df = pd.DataFrame(tb_flat[:, valid_cols])
+        corr = df.corr().values
+        for ii, i in enumerate(valid_cols):
+            for jj, j in enumerate(valid_cols):
+                corr_mats[ei, i, j] = corr[ii, jj]
+
+    return elevations, channels, corr_mats
+
+
+##############################################################################
+# 2a. Plot: Azimuth correlation matrix, one subplot per channel
+##############################################################################
+
+def plot_azimuth_corr_matrices(azimuths, corr_mats, elevation,
+            channel_labels=None, levels=(0.5, 0.75, 0.9), tag=""):
+    n_chan = corr_mats.shape[0]
+    n_cols = 4
+    n_rows = int(np.ceil(n_chan / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3.8*n_rows),
+                             squeeze=False)
+    axes_flat = axes.flatten()
+
+    for ch in range(n_chan):
+        ax = axes_flat[ch]
+        im = ax.pcolormesh(azimuths, azimuths, corr_mats[ch],
+                           cmap="RdBu_r", vmin=-1, vmax=1, shading="auto")
+        cs = ax.contour(azimuths, azimuths, corr_mats[ch],
+                        levels=levels, colors="black", linewidths=0.8)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%.2f")
+        label = channel_labels[ch] if channel_labels is not None else f"Ch{ch+1}"
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel("Azimuth [°]", fontsize=8)
+        ax.set_ylabel("Azimuth [°]", fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for ax in axes_flat[n_chan:]:
+        ax.axis("off")
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label="Correlation")
+    fig.suptitle(f"Azimuth-Azimuth TB correlation per channel  (elevation={elevation:.1f}° / {tag})",
+                fontsize=14, fontweight="bold")
+    outpath=f"/home/aki/PhD_plots/{tag}_corr_azimuth.png"
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close()    
+    print(f"Saved: {outpath}")
+
+
+##############################################################################
+# 2b. Plot: Elevation correlation matrix, one subplot per channel
+##############################################################################
+
+def plot_elevation_corr_matrices(elevations, corr_mats, azimuth,
+                        channel_labels=None, levels=(0.5, 0.75, 0.9), tag=""):
+    n_chan = corr_mats.shape[0]
+    n_cols = 4
+    n_rows = int(np.ceil(n_chan / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3.8*n_rows),
+                             squeeze=False)
+    axes_flat = axes.flatten()
+
+    for ch in range(n_chan):
+        ax = axes_flat[ch]
+        im = ax.pcolormesh(elevations, elevations, corr_mats[ch],
+                           cmap="RdBu_r", vmin=-1, vmax=1, shading="auto")
+        cs = ax.contour(elevations, elevations, corr_mats[ch],
+                        levels=levels, colors="black", linewidths=0.8)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%.2f")
+        label = channel_labels[ch] if channel_labels is not None else f"Ch{ch+1}"
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel("Elevation [°]", fontsize=8)
+        ax.set_ylabel("Elevation [°]", fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for ax in axes_flat[n_chan:]:
+        ax.axis("off")
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label="Correlation")
+    fig.suptitle(f"Elevation-Elevation TB correlation per channel  (azimuth mean / {tag})",
+                fontsize=14, fontweight="bold")
+    outpath=f"/home/aki/PhD_plots/{tag}_corr_elevation.png"
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {outpath}")
+
+
+##############################################################################
+# 2c. Plot: Channel correlation matrix, one subplot per elevation
+##############################################################################
+
+def plot_channel_corr_matrices(elevations, channels, corr_mats,
+                               levels=(0.5, 0.75, 0.9), tag=""):
+    n_ele = corr_mats.shape[0]
+    n_cols = 4
+    n_rows = int(np.ceil(n_ele / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3.8*n_rows),
+                             squeeze=False)
+    axes_flat = axes.flatten()
+
+    for ei in range(n_ele):
+        ax = axes_flat[ei]
+        im = ax.pcolormesh(channels, channels, corr_mats[ei],
+                           cmap="RdBu_r", vmin=-1, vmax=1, shading="auto")
+        cs = ax.contour(channels, channels, corr_mats[ei],
+                        levels=levels, colors="black", linewidths=0.8)
+        ax.clabel(cs, inline=True, fontsize=6, fmt="%.2f")
+        ax.set_title(f"Elev {elevations[ei]:.1f}°", fontsize=10)
+        ax.set_xlabel("Channel", fontsize=8)
+        ax.set_ylabel("Channel", fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for ax in axes_flat[n_ele:]:
+        ax.axis("off")
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label="Correlation")
+    fig.suptitle(f"Channel-Channel TB correlation per elevation - {tag}",
+                fontsize=14, fontweight="bold")
+    outpath=f"/home/aki/PhD_plots/{tag}_corr_channels.png"
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {outpath}")
+
+
+##############################################################################
+# 3. Main integration
+##############################################################################
+
+if __name__=="__main__":    
+    args = parse_arguments()
+    ds0 = xr.open_dataset(args.infile)
+
+    tag=(str(args.infile).split("/MWR_scans_")[1]).split(".")[0]
+
+    #########################
+    # Additional filters:
+    # Exclude clouds & RFI:
+    # ds = clear_dataset(ds0)
+    ds = ds0
+    ds = ds0.sel(elevation=ds0["elevation"] != 50.0)
+    #n_before = int(np.sum(~np.isnan(ds.isel(elevation=i_elev)["tb"].values)))
+    #rfi_mask_da = derive_rfi_angles(ds)
+    #ds["tb"] = ds["tb"].where(rfi_mask_da)    
+    ####################################
+
+    # ── Azimuth correlation matrix per channel (at zenith or lowest elevation) ─
+    for ele_ref in ds["elevation"].values:
+        azimuths, azi_corr = get_azimuth_corr_matrices(ds, elevation=ele_ref)
+        plot_azimuth_corr_matrices(azimuths, azi_corr, elevation=ele_ref,
+                            tag=tag+"_"+str(ele_ref))
+
+    # ── Elevation correlation matrix per channel (at azimuth 0°) ──────────────
+    azi_ref = ds["azimuth"].values[0]
+    elevations, ele_corr = get_elevation_corr_matrices(ds, azimuth=azi_ref)
+    plot_elevation_corr_matrices(elevations, ele_corr, azi_ref,
+         tag=tag)
+
+    # ── Channel correlation matrix per elevation ──────────────────────────────
+    elevations, channels, chan_corr = get_channel_corr_matrices(ds)
+    plot_channel_corr_matrices(elevations, channels, chan_corr,
+         tag=tag)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
