@@ -12,6 +12,8 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib
+import pandas as pd
+from datetime import datetime
 
 ##############################################################################
 # 2nd Params:
@@ -34,10 +36,10 @@ def parse_arguments():
     parser.add_argument(
         "--in_pattern", "-i",
         type=str,
-        default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/*/MWR_1C01_sinthern_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
@@ -49,12 +51,12 @@ def parse_arguments():
     parser.add_argument(
         "--outfile", "-o",
         type=str,
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc"),
@@ -123,6 +125,238 @@ def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
 
 ###############################################################################
 
+def running_std_10min(ds,  timeslice,channel_idx=6):
+    """
+    Berechnet die rollende 10-Minuten-Standardabweichung für einen Kanal
+    des tb-DataArrays, und extrahiert davon nur die gewünschten Zeitpunkte
+    (timeslice = Array von Indizes).
+    """
+    # tb-Zeitreihe für den gewünschten Kanal als pandas Series
+    # (Zeitindex bleibt identisch zur Originalauflösung!)
+    times = ds["time"].values
+    tb_channel = ds["tb"].values[:,channel_idx] 
+
+    s = pd.Series(tb_channel, index=pd.DatetimeIndex(times))
+
+    # Rollendes 10-Minuten-Fenster, zentriert:
+    std_10min = s.rolling("10min", center=True, min_periods=1).std()
+    # std_10min.values[timeslice] within intervall
+    
+    std10_before = std_10min.values[timeslice[0]-20:timeslice[0]-10]
+    std10_after = std_10min.values[timeslice[0]+10:timeslice[0]+20]
+
+    # Nur die gewünschten Zeitpunkte (timeslice-Indizes) zurückgeben:
+    return std10_before, std10_after
+
+###############################################################################
+##############################################################################
+# Registry describing how to interpret known flag-like variables.
+# "mode012"  -> priority-based combination: any 1 (cloudy) dominates,
+#               else any 2 (undefined) dominates, else 0 (clear)
+# "bitwise"  -> bitwise OR across all valid values in the timeslice
+#               (works for plain 0/1 flags too, since OR of 0/1 == logical OR)
+# "mean"     -> not a flag, but a continuous quantity (e.g. rain rate) that
+#               gets averaged over the timeslice instead of combined logically
+##############################################################################
+
+FLAG_REGISTRY = {
+    "liquid_cloud_flag": {"kind": "mode012", "fill": np.nan},
+    "flag":              {"kind": "bitwise", "fill": 0},
+    "quality_flag":      {"kind": "bitwise", "fill": np.nan},
+    "rain_flag":         {"kind": "bitwise", "fill": np.nan},
+}
+
+RATE_REGISTRY = {
+    "rainfall_rate": {"fill": np.nan},
+}
+
+
+def _extract_fill(ds_old, var, fallback):
+    """Prefer the variable's own _FillValue attribute, else use fallback."""
+    if var in ds_old and "_FillValue" in ds_old[var].attrs:
+        return ds_old[var].attrs["_FillValue"]
+    return fallback
+
+
+def _combine_flag_for_timeslice(vals, kind, fill):
+    """Combine all valid flag values within one timeslice into a single value,
+    following the rule: a single flagged sample sets the whole scan's flag."""
+    valid = vals[~np.isnan(vals) & (vals != fill)] if np.issubdtype(vals.dtype, np.floating) \
+        else vals[vals != fill]
+
+    if len(valid) == 0:
+        return np.nan
+
+    valid = valid.astype(int)
+
+    if kind == "mode012":
+        if 1 in valid:
+            return 1
+        elif 2 in valid:
+            return 2
+        else:
+            return 0
+
+    elif kind == "bitwise":
+        combined = 0
+        for v in valid:
+            combined |= v
+        return combined
+
+    else:
+        raise ValueError(f"Unknown flag kind: {kind}")
+
+
+def _detect_available_flags(ds_old):
+    """
+    Scan ds_old for known flag/rate variables (from the registries), plus any
+    additional '*_flag' variables not explicitly registered (auto-detected,
+    treated generically as bitwise flags).
+    Returns dict: {var_name: {"kind": ..., "fill": ...}} for flags
+           dict: {var_name: {"fill": ...}} for rate-like variables
+    """
+    found_flags = {}
+    for var, meta in FLAG_REGISTRY.items():
+        if var in ds_old.data_vars and "time" in ds_old[var].dims:
+            found_flags[var] = {
+                "kind": meta["kind"],
+                "fill": _extract_fill(ds_old, var, meta["fill"]),
+            }
+
+    # Auto-detect any further "*_flag" variables not already registered:
+    for var in ds_old.data_vars:
+        if var not in found_flags and "flag" in var.lower() and "time" in ds_old[var].dims:
+            found_flags[var] = {
+                "kind": "bitwise",
+                "fill": _extract_fill(ds_old, var, np.nan),
+            }
+
+    found_rates = {}
+    for var, meta in RATE_REGISTRY.items():
+        if var in ds_old.data_vars and "time" in ds_old[var].dims:
+            found_rates[var] = {"fill": _extract_fill(ds_old, var, meta["fill"])}
+
+    return found_flags, found_rates
+
+##############################################################################
+
+def std10_before_after_zenith(ds_old, timeslice, ele_var="ele",
+                              tb_var="tb", channel_idx=6,
+                              elevations=elevations, window="10min"):
+    """
+    Computes the std of TB (channel_idx, default=31GHz/ch7) over the 10min
+    window directly before and directly after the scan, using ONLY samples
+    with elevation angle == 90° (zenith). Returns (std_before, std_after),
+    each a single float (NaN if no zenith samples found in that window).
+    """
+    scan_start = ds_old["time"].values[timeslice[0]]
+    scan_end   = ds_old["time"].values[timeslice[-1]]
+
+    win = np.timedelta64(10, "m")
+    before_mask_time = (ds_old["time"].values >= scan_start - win) & \
+                      (ds_old["time"].values <  scan_start)
+    after_mask_time  = (ds_old["time"].values >  scan_end) & \
+                      (ds_old["time"].values <= scan_end + win)
+
+    zenith_mask = np.abs(ds_old[ele_var].values - 90.0) < max_elev_azi_diff
+
+    before_mask = before_mask_time & zenith_mask
+    after_mask  = after_mask_time  & zenith_mask
+
+    tb_vals = ds_old[tb_var].values[:, channel_idx]
+
+    std_before = np.nanstd(tb_vals[before_mask]) if before_mask.any() else np.nan
+    std_after  = np.nanstd(tb_vals[after_mask])  if after_mask.any()  else np.nan
+
+    return std_before, std_after
+
+##############################################################################
+
+def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,
+                                       tb_var="tb", ele_var="ele", azi_var="azi",
+                                       elevations=elevations, azimuths=azimuths):
+
+    n_scans = len(time_indices_list_list)
+
+    # ── TB array (unverändert) ──────────────────────────────────────────────
+    tbs = np.full((n_scans, len(elevations), len(azimuths), 14), np.nan)
+
+    # ── Auto-detect which flags/rates actually exist in this dataset ─────────
+    available_flags, available_rates = _detect_available_flags(ds_old)
+
+    # Output containers — one array per detected variable, NaN-filled if
+    # nothing at all was found for that name:
+    flag_outputs = {name: np.full(n_scans, np.nan) for name in available_flags}
+    rate_outputs = {name: np.full(n_scans, np.nan) for name in available_rates}
+
+    time_array = []
+    std10_before_list = []
+    std10_after_list  = []
+    ir_cloudflag = []
+
+    # All scans within MWR file:
+    for i, timeslice in enumerate(time_indices_list_list):
+
+        # ── Generic flag aggregation ──────────────────────────────────────────
+        for var, meta in available_flags.items():
+            vals = ds_old[var].values[timeslice]
+            flag_outputs[var][i] = _combine_flag_for_timeslice(
+                vals, meta["kind"], meta["fill"])
+
+        # ── Generic rate aggregation (mean, not logical combination) ───────────
+        for var, meta in available_rates.items():
+            vals = ds_old[var].values[timeslice]
+            fill = meta["fill"]
+            valid = vals[~np.isnan(vals) & (vals != fill)]
+            if len(valid) > 0:
+                rate_outputs[var][i] = np.nanmean(valid)
+
+        ###############
+        # 1st: 31 GHz std, 10min before and after scan (zenith-only samples):
+        std10_before, std10_after = std10_before_after_zenith(
+            ds_old, timeslice, ele_var=ele_var, tb_var=tb_var, elevations=elevations)
+        std10_before_list.append(std10_before)
+        std10_after_list.append(std10_after)
+
+        #########
+        # 2nd cloud flag based on T_ir values (if they are there):
+        ir_threshold_K = 273.15 - 30  # -30°C in Kelvin
+        if "tb_irp" in ds_old:
+            tir_vals = ds_old["tb_irp"].values[timeslice, :]
+            if np.any(tir_vals > ir_threshold_K):
+                ir_cloudflag.append(1)
+            else:
+                ir_cloudflag.append(0)
+        elif "irt" in ds_old:
+            tir_vals = ds_old["irt"].values[timeslice, :]
+            if np.any(tir_vals > ir_threshold_K):
+                ir_cloudflag.append(1)
+            else:
+                ir_cloudflag.append(0)
+        else:
+            ir_cloudflag.append(np.nan)
+
+        ####
+        # Always:
+        # Average of time over timeslice:
+        times = ds_old["time"].values[timeslice]
+        times_ns = times.astype("int64")
+        mean_ns  = np.nanmean(times_ns)
+        mean_time = mean_ns.astype("datetime64[ns]")
+        time_array.append(mean_time)
+
+        # Check one scan of MWR in:
+        for j in timeslice:
+            k = np.nanargmin(np.abs(elevations - ds_old[ele_var].values[j]))
+            m = np.nanargmin(np.abs(azimuths - ds_old[azi_var].values[j]))
+            tbs[i, k, m, :] = ds_old[tb_var].values[j, :]
+
+    # return (time_array, tbs, flag_outputs, rate_outputs,
+    #        np.array(std10_cloudflag), np.array(ir_cloudflag))
+    return (time_array, tbs, flag_outputs, rate_outputs,
+            np.array(std10_before_list), np.array(std10_after_list),\
+            np.array(ir_cloudflag))
+'''
 def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,\
                                 tb_var="tb", ele_var="ele", azi_var="azi",\
                                 elevations=elevations, azimuths=azimuths):
@@ -133,7 +367,9 @@ def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,\
     flags = np.full(len(time_indices_list_list), -2147483647, dtype=int)
     rainfall = np.full(len(time_indices_list_list), np.nan, dtype=float)
     time_array = []
-    
+    std10_cloudflag = []
+    ir_cloudflag = []
+        
     # All scans within MWR file:
     for i, timeslice in enumerate(time_indices_list_list):
 
@@ -181,6 +417,27 @@ def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,\
             else:
                 flags[i] = 0  # kein gültiger Wert → kein Flag
 
+        ###############
+        # 1st cloud flag 31 GHz std:
+        std10_before, std10_after = running_std_10min(ds_old,  timeslice)
+        
+        if np.all(std10_before<0.2) and np.all(std10_after<0.2):
+            std10_cloudflag.append(0)
+        else:
+            std10_cloudflag.append(1)
+        
+        ######### 
+        # 2nd cloud flag based on T_ir values (if they are there):
+        ir_threshold_K = 273.15 - 30  # -30°C in Kelvin
+        if "tb_irp" in ds_old:
+            tir_vals = ds_old["tb_irp"].values[timeslice, :]
+            if np.any(tir_vals > ir_threshold_K):
+                ir_cloudflag.append(1)
+            else:
+                ir_cloudflag.append(0)
+        else:
+            ir_cloudflag.append(np.nan)   
+        
         ####
         # Always:
         # Average of time over timeslice:
@@ -196,8 +453,8 @@ def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,\
             m = np.nanargmin(np.abs(azimuths-ds_old[azi_var].values[j]))
             tbs[i, k, m,:] = ds_old[tb_var].values[j, :]
 
-    return time_array, tbs, flags, rainfall
-
+    return time_array, tbs, flags, rainfall, np.array(std10_cloudflag), np.array(ir_cloudflag)
+'''
 ###############################################################################
 
 def determine_ds_vars4elev_azi_TB(ds_in):
@@ -222,7 +479,230 @@ def determine_ds_vars4elev_azi_TB(ds_in):
 
 ###############################################################################
 
-def create_scan_ds(time_array, tbs, flags, rainfall, elevations=elevations,\
+def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
+                   std10_before, std10_after, ir_cloudflag,
+                   elevations=elevations, azimuths=azimuths,
+                   ele_var="ele", tb_var="tb", azi_var="azi"):
+    # tbs -> DataArray, damit wir bequem über dims prüfen können
+    tbs_da = xr.DataArray(
+        tbs,
+        dims=("time", "elevation", "azimuth", "N_Channels"),
+        coords={
+            "time": time_array,
+            "elevation": elevations,
+            "azimuth": azimuths,
+            "N_Channels": np.arange(14) + 1,
+        },
+    )
+    has_data_time    = ~np.isnan(tbs_da).all(dim=("elevation", "azimuth", "N_Channels"))
+    has_data_elev    = ~np.isnan(tbs_da).all(dim=("time", "azimuth", "N_Channels"))
+    tbs_clean = tbs_da.sel(
+        time=tbs_da.time[has_data_time],
+        elevation=tbs_da.elevation[has_data_elev],
+        azimuth=tbs_da.azimuth,
+    )
+    ds_out = xr.Dataset(
+        data_vars={
+            "tb": (("time", "elevation", "azimuth", "N_Channels"), tbs_clean.data),
+        },
+        coords={
+            "time": tbs_clean.coords["time"],
+            "elevation": tbs_clean.coords["elevation"],
+            "azimuth": tbs_clean.coords["azimuth"],
+            "N_Channels": tbs_clean.coords["N_Channels"],
+        },
+    )
+
+    ####
+    # Generic flag variables:
+    for var_name, flag_vals in flag_outputs.items():
+        flag_masked = np.asarray(flag_vals)[has_data_time.values]
+        if np.all(np.isnan(flag_masked)):
+            continue
+        ds_out[var_name] = xr.DataArray(
+            flag_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={"units": "1", "long_name": f"{var_name} (auto-aggregated per scan)",
+                  "_FillValue": np.nan,
+                  "comment": "A single flagged sample within the scan sets the whole scan's flag value."}
+        )
+
+    ####
+    # Generic rate variables:
+    for var_name, rate_vals in rate_outputs.items():
+        rate_masked = np.asarray(rate_vals)[has_data_time.values]
+        if np.all(np.isnan(rate_masked)):
+            continue
+        ds_out[var_name] = xr.DataArray(
+            rate_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={"units": "unknown", "long_name": f"{var_name} (mean-aggregated per scan)",
+                  "_FillValue": np.nan}
+        )
+
+    ###
+    # std10_before / std10_after — replaces the old std10_cloud_flag:
+    std_before_masked = np.asarray(std10_before)[has_data_time.values]
+    if not np.all(np.isnan(std_before_masked.astype(float))):
+        ds_out["std10_before"] = xr.DataArray(
+            std_before_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "K",
+                "long_name": "Std of 31 GHz TB (zenith-only) over 10min before scan",
+                "comment": "Computed only from samples with elevation angle == 90°.",
+            }
+        )
+
+    std_after_masked = np.asarray(std10_after)[has_data_time.values]
+    if not np.all(np.isnan(std_after_masked.astype(float))):
+        ds_out["std10_after"] = xr.DataArray(
+            std_after_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "K",
+                "long_name": "Std of 31 GHz TB (zenith-only) over 10min after scan",
+                "comment": "Computed only from samples with elevation angle == 90°.",
+            }
+        )
+
+    ###
+    # Add IR cloud flag:
+    ir_masked = np.asarray(ir_cloudflag)[has_data_time.values]
+    if not np.all(np.isnan(ir_masked.astype(float))):
+        ds_out["ir_cloud_flag"] = xr.DataArray(
+            ir_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "Cloud flag based on IR brightness temperature",
+                "flag_values": "0, 1",
+                "flag_meanings": "clear cloudy",
+                "comment": "1 if any IR channel (tb_irp/irt) exceeds 243.15 K (-30°C)",
+            }
+        )
+
+    ds_out = interpolate_azimuths(ds_out, ele_var=ele_var, tb_var=tb_var)
+
+    return ds_out
+'''
+
+def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs, std10_cloudflag,
+                   ir_cloudflag, elevations=elevations,
+                   azimuths=azimuths,
+                   ele_var="ele", tb_var="tb", azi_var="azi"):
+    # tbs -> DataArray, damit wir bequem über dims prüfen können
+    tbs_da = xr.DataArray(
+        tbs,
+        dims=("time", "elevation", "azimuth", "N_Channels"),
+        coords={
+            "time": time_array,
+            "elevation": elevations,
+            "azimuth": azimuths,
+            "N_Channels": np.arange(14) + 1,
+        },
+    )
+    # Maske: wo ist irgendwo ein echter Wert?
+    has_data_time    = ~np.isnan(tbs_da).all(dim=("elevation", "azimuth", "N_Channels"))
+    has_data_elev    = ~np.isnan(tbs_da).all(dim=("time", "azimuth", "N_Channels"))
+    # nur die Slices behalten, die irgendwo Daten haben
+    tbs_clean = tbs_da.sel(
+        time=tbs_da.time[has_data_time],
+        elevation=tbs_da.elevation[has_data_elev],
+        azimuth=tbs_da.azimuth,
+    )
+    # Neues Dataset aus dem bereinigten DataArray
+    ds_out = xr.Dataset(
+        data_vars={
+            "tb": (("time", "elevation", "azimuth", "N_Channels"), tbs_clean.data),
+        },
+        coords={
+            "time": tbs_clean.coords["time"],
+            "elevation": tbs_clean.coords["elevation"],
+            "azimuth": tbs_clean.coords["azimuth"],
+            "N_Channels": tbs_clean.coords["N_Channels"],
+        },
+    )
+
+    ####
+    # Generic flag variables — add only if not entirely NaN after masking:
+    for var_name, flag_vals in flag_outputs.items():
+        flag_masked = np.asarray(flag_vals)[has_data_time.values]
+        if np.all(np.isnan(flag_masked)):
+            continue  # nothing valid for this flag in this file — skip
+        ds_out[var_name] = xr.DataArray(
+            flag_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": f"{var_name} (auto-aggregated per scan)",
+                "_FillValue": np.nan,
+                "comment": "A single flagged sample within the scan sets the "
+                          "whole scan's flag value.",
+            }
+        )
+
+    ####
+    # Generic rate variables (e.g. rainfall_rate) — mean-aggregated, add only
+    # if not entirely NaN after masking:
+    for var_name, rate_vals in rate_outputs.items():
+        rate_masked = np.asarray(rate_vals)[has_data_time.values]
+        if np.all(np.isnan(rate_masked)):
+            continue
+        ds_out[var_name] = xr.DataArray(
+            rate_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "unknown",
+                "long_name": f"{var_name} (mean-aggregated per scan)",
+                "_FillValue": np.nan,
+            }
+        )
+
+    ###
+    # Add std10 cloud flag (only if not all-NaN):
+    std10_masked = np.asarray(std10_cloudflag)[has_data_time.values]
+    if not np.all(np.isnan(std10_masked.astype(float))):
+        ds_out["std10_cloud_flag"] = xr.DataArray(
+            std10_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "Cloud flag based on 31 GHz TB standard deviation",
+                "flag_values": "0, 1",
+                "flag_meanings": "clear cloudy",
+                "comment": "1 if 10min running std of TB channel 7 (~31 GHz) "
+                          "exceeds 0.2 K before or after the scan",
+            }
+        )
+
+    ###
+    # Add IR cloud flag (only if not all-NaN / all-fill):
+    ir_masked = np.asarray(ir_cloudflag)[has_data_time.values]
+    if not np.all(np.isnan(ir_masked.astype(float))):
+        ds_out["ir_cloud_flag"] = xr.DataArray(
+            ir_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "Cloud flag based on IR brightness temperature",
+                "flag_values": "0, 1",
+                "flag_meanings": "clear cloudy",
+                "comment": "1 if any IR channel (tb_irp) exceeds 243.15 K (-30°C)",
+            }
+        )
+
+    ds_out = interpolate_azimuths(ds_out, ele_var=ele_var, tb_var=tb_var)
+
+    return ds_out
+
+
+def create_scan_ds(time_array, tbs, flags, rainfall, std10_cloudflag,\
+                    ir_cloudflag, elevations=elevations,\
                     azimuths=azimuths,\
                    ele_var="ele", tb_var="tb", azi_var="azi"):
     # tbs -> DataArray, damit wir bequem über dims prüfen können
@@ -294,11 +774,48 @@ def create_scan_ds(time_array, tbs, flags, rainfall, elevations=elevations,\
         )
         ds_out["rainfall_rate"] = rain_da
 
+    ###
+    # Add std10 cloud flag (only if not all-NaN / all-fill):
+    std10_masked = np.asarray(std10_cloudflag)[has_data_time.values]
+    if std10_masked is not None and not np.all(np.isnan(std10_masked.astype(float))):
+        std10_da = xr.DataArray(
+            std10_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "Cloud flag based on 31 GHz TB standard deviation",
+                "flag_values": "0, 1",
+                "flag_meanings": "clear cloudy",
+                "comment": "1 if 10min running std of TB channel 7 (~31 GHz) exceeds 0.2 K before or after the scan",
+            }
+        )
+        ds_out["std10_cloud_flag"] = std10_da
+
+    ###
+    # Add IR cloud flag (only if not all-NaN / all-fill):
+    ir_masked = np.asarray(ir_cloudflag)[has_data_time.values]
+    if ir_masked is not None and not np.all(ir_masked == -2147483647) and \
+       not np.all(np.isnan(ir_masked.astype(float))):
+        ir_da = xr.DataArray(
+            ir_masked,
+            dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "Cloud flag based on IR brightness temperature",
+                "flag_values": "0, 1",
+                "flag_meanings": "clear cloudy",
+                "_FillValue": -2147483647,
+                "comment": "1 if any IR channel (tb_irp) exceeds 243.15 K (-30°C)",
+            }
+        )
+        ds_out["ir_cloud_flag"] = ir_da
+
     ds_out = interpolate_azimuths(ds_out, ele_var=ele_var, tb_var=tb_var)
     
     return ds_out
-
-
+'''
 ###############################################################################
 
 def determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
@@ -523,17 +1040,43 @@ def resample_mwr_ds_on_scan_freq(ds_old):
     time_indices_list_list, BL_time_indices_list_list =\
         determine_scan_slices(ds_old, ele_var=ele_var, azi_var=azi_var)
     
+    #########################
     # 2nd calc mean timestamp and mean measurements for these timeslices
-    time_array, tbs, flags, rainfall = determine_data_in_time_for_scanset(ds_old,\
+    '''
+    time_array, tbs, flags, rainfall, std10_cloudflag, ir_cloudflag =\
+            determine_data_in_time_for_scanset(ds_old,\
             time_indices_list_list, tb_var=tb_var, ele_var=ele_var,\
             azi_var=azi_var)
+    
+    time_array, tbs, flag_outputs, rate_outputs, std10_cloudflag, ir_cloudflag =\
+            determine_data_in_time_for_scanset(ds_old,\
+            time_indices_list_list, tb_var=tb_var, ele_var=ele_var,\
+            azi_var=azi_var)   
+    '''
+    # 2nd calc mean timestamp and mean measurements for these timeslices
+    time_array, tbs, flag_outputs, rate_outputs, std10_before, std10_after, ir_cloudflag =\
+            determine_data_in_time_for_scanset(ds_old,\
+            time_indices_list_list, tb_var=tb_var, ele_var=ele_var,\
+            azi_var=azi_var) 
+    #########################
     time_array_bl, tbs_bl, flags_bl, rainfall_bl =\
             determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
             tb_var=tb_var, ele_var=ele_var, azi_var=azi_var)
-
     # 3rd Create new dataset of scans:
-    ds_new = create_scan_ds(time_array, tbs, flags, rainfall, elevations=elevations,\
+    ds_new = create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
+                            std10_before, std10_after, ir_cloudflag,
+                            elevations=elevations, azimuths=azimuths,
+                            ele_var=ele_var, tb_var=tb_var, azi_var=azi_var)
+    '''
+    # 3rd Create new dataset of scans:
+    ds_new = create_scan_ds(time_array, tbs, flag_outputs, rate_outputs, std10_cloudflag,\
+             ir_cloudflag, elevations=elevations,\
             azimuths=azimuths, ele_var=ele_var, tb_var=tb_var, azi_var=azi_var)
+    
+    ds_new = create_scan_ds(time_array, tbs, flags, rainfall, std10_cloudflag,\
+             ir_cloudflag, elevations=elevations,\
+            azimuths=azimuths, ele_var=ele_var, tb_var=tb_var, azi_var=azi_var)
+    '''
     ds_bl = create_BL_ds(ds_old,time_array_bl, tbs_bl, flags_bl, rainfall_bl,
                  elevations=elevations,
                  ele_var=ele_var,
@@ -558,55 +1101,7 @@ def drop_allnan_time(ds, tb_var="tb"):
 ##############################################################################
 # 5th Main code:
 ##############################################################################
-'''
-# Claude variant against RAM shortage:
-if __name__ == "__main__":
-    args = parse_arguments()
-    files = sorted(glob.glob(args.in_pattern))
-    n = len(files)
 
-    tmp_files = []
-    for i, file in enumerate(files):
-        print(f"Read file {i} of {n}")
-        ds = xr.open_dataset(file)
-        ds_resamp, ds_bl = resample_mwr_ds_on_scan_freq(ds)
-
-        ###########
-        # Break here when working on timeslice detection:
-        # break
-        ###########
-
-        ###
-        # Leave out empty datasets:
-        if ds_resamp.sizes["time"] == 0:
-            print(f"  → no valid scans in file {i} — skipping")
-            ds.close()
-            ds_resamp.close()
-            continue
-        ###
-
-        ds_resamp = ds_resamp.assign_coords(
-            time=ds_resamp["time"].astype("datetime64[ns]"))
-
-        # Direkt als temp-Datei schreiben statt in RAM halten:
-        tmp_path = args.outfile + f".tmp_{i:04d}.nc"
-        ds_resamp.to_netcdf(tmp_path)
-        tmp_files.append(tmp_path)
-        ds.close()
-        ds_resamp.close()
-
-    # Am Ende lazy einlesen und zusammenfügen:
-    print("Concatenating...")
-    # ds_final = xr.open_mfdataset(tmp_files, combine="by_coords")
-    ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
-    ds_final.to_netcdf(args.outfile)
-
-    # Temp-Dateien aufräumen:
-    for tmp in tmp_files:
-        os.remove(tmp)
-
-    print("Done:", args.outfile)
-'''
 if __name__ == "__main__":
     args = parse_arguments()
     files = sorted(glob.glob(args.in_pattern))
@@ -669,33 +1164,6 @@ if __name__ == "__main__":
         print("Done:", outfile_bl)
     else:
         print("No BL scan data to write.")
-    '''
-    # ── Concatenate azimuth scans ─────────────────────────────────────────────
-    if tmp_files:
-        print("Concatenating azimuth scans...")
-        ds_final = xr.open_mfdataset(tmp_files, combine="nested", concat_dim="time")
-        ds_final.to_netcdf(args.outfile)
-        ds_final.close()
-        for tmp in tmp_files:
-            os.remove(tmp)
-        print("Done:", args.outfile)
-    else:
-        print("No azimuth scan data to write.")
-
-    # ── Concatenate BL scans ──────────────────────────────────────────────────
-    if tmp_files_bl:
-        outfile_bl = args.outfile.replace(".nc", "_BL.nc")
-        print("Concatenating BL scans...")
-        ds_final_bl = xr.open_mfdataset(tmp_files_bl, combine="nested", concat_dim="time")
-        ds_final_bl.to_netcdf(outfile_bl)
-        ds_final_bl.close()
-        for tmp in tmp_files_bl:
-            os.remove(tmp)
-        print("Done:", outfile_bl)
-    else:
-        print("No BL scan data to write.")
-    '''
-
 
 ###################################################
 

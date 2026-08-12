@@ -430,6 +430,10 @@ def clear_dataset(ds_in):
     n_time = ds_in.sizes["time"]
     clear_mask = np.ones(n_time, dtype=bool)  # alle True = behalten
 
+    print("****************************")
+    print("CLearing algorithm statrs here:")
+    print(ds_in)
+
     if "liquid_cloud_flag" in ds_in:
         cf = ds_in["liquid_cloud_flag"].values
         clear_mask &= (cf == 0)
@@ -472,7 +476,7 @@ def derive_rfi_angles(ds, i_elev=0, n_sigmas_rfi=n_sigmas_rfi):
     scan_diffs     = tb_all - minima_by_chan                    # (time, azimuth, N_Channels)
 
     #Calc and apply threshold:
-    rfi_mask = adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi)  # ← kein zweites < mehr!
+    rfi_mask = adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi) 
 
     rfi_mask_da = xr.DataArray(
         rfi_mask,
@@ -568,8 +572,15 @@ if __name__=="__main__":
     short_tag = tag.split(".")[0]
 
     # Exclude clouds & RFI:
+
+    # 1st exclude clouds (RFI exclusion should be performed on clear sky only!!!
     # ds = clear_dataset(ds0)
     ds = ds0
+    ###########
+    # sys.exit()
+    ##########
+
+    # 2nd exclude RFIs!!!!
     n_before = int(np.sum(~np.isnan(ds.isel(elevation=i_elev)["tb"].values)))
     rfi_mask_da = derive_rfi_angles(ds)
     ds["tb"] = ds["tb"].where(rfi_mask_da)    
