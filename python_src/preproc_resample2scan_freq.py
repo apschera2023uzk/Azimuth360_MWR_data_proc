@@ -42,13 +42,13 @@ def parse_arguments():
         "--in_pattern", "-i",
         type=str,
         # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/*/MWR_1C01_sinthern_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/mecken_jun26/MWR_1C01_*.nc"),
         help="Pattern of MWR output files with TBs of scans."
@@ -57,12 +57,12 @@ def parse_arguments():
         "--outfile", "-o",
         type=str,
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc"),
         help="NetCDF Output file path."
@@ -201,7 +201,6 @@ def running_std_10min(ds,  timeslice,channel_idx=6):
     return std10_before, std10_after
 
 ###############################################################################
-##############################################################################
 # Registry describing how to interpret known flag-like variables.
 # "mode012"  -> priority-based combination: any 1 (cloudy) dominates,
 #               else any 2 (undefined) dominates, else 0 (clear)
@@ -444,6 +443,13 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
                    std10_before, std10_after, irt,cloudbases,
                    elevations=elevations, azimuths=azimuths,
                    ele_var="ele", tb_var="tb", azi_var="azi"):
+
+    # Determine cloudflags:
+    ceilo_flag = ~np.isnan(cloudbases)
+    std_flag   = (std10_after > 0.2) | (std10_before > 0.2)
+    irt_flag   = np.nanmean(np.nanmean(irt, axis=1), axis=1)>243.15
+    comb_flag = std_flag | irt_flag
+
     # tbs -> DataArray, damit wir bequem über dims prüfen können
     tbs_da = xr.DataArray(
         tbs,
@@ -539,6 +545,18 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
             }
         )
 
+    comb_flag_masked = np.asarray(comb_flag)[has_data_time.values]
+    if not np.all(np.isnan(comb_flag_masked.astype(bool))):
+        ds_out["comb_flag"] = xr.DataArray(
+            comb_flag_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "m",
+                "long_name": "combined cloud flag (Std & IR)",
+                "comment": "0 for clear by std<0.2 at 31.4 GHz and mean IR<243.15",
+            }
+        )
+
 
     ###
     # Add IR brightness temperature (irt), same spatial structure as tb:
@@ -576,88 +594,98 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
 
 ###############################################################################
 
-def determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
-                                tb_var="tb", ele_var="ele", azi_var="azi",\
-                                elevations=elevations, azimuths=azimuths):
-    
-    # Create empty TB array with dims: (time,elev,azi,ch)
-    tbs = np.full((len(BL_time_indices_list_list),len(elevations),\
-                   14), np.nan)
-    flags = np.full(len(BL_time_indices_list_list), -2147483647, dtype=int)
-    rainfall = np.full(len(BL_time_indices_list_list), np.nan, dtype=float)
+def determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,
+        tb_var="tb", ele_var="ele", azi_var="azi",
+        elevations=elevations, azimuths=azimuths, cloudbases=None):
+
+    n_scans = len(BL_time_indices_list_list)
+
+    # ── TB array: BL scans have no azimuth dimension (fixed azimuth) ─────────
+    tbs = np.full((n_scans, len(elevations), 14), np.nan)
+    irt = np.full((n_scans, len(elevations)), np.nan)
+
+    # ── Auto-detect which flags/rates actually exist in this dataset ─────────
+    available_flags, available_rates = _detect_available_flags(ds_old)
+    flag_outputs = {name: np.full(n_scans, np.nan) for name in available_flags}
+    rate_outputs = {name: np.full(n_scans, np.nan) for name in available_rates}
+
     time_array = []
-    
+    std10_before_list = []
+    std10_after_list  = []
+    cloudbase_list = []
+
     # All scans within MWR file:
     for i, timeslice in enumerate(BL_time_indices_list_list):
 
-        ####
-        # Only for Jülich / Vital I:
-        if ele_var == "elevation_angle": 
+        # ── Generic flag aggregation ──────────────────────────────────────────
+        for var, meta in available_flags.items():
+            vals = ds_old[var].values[timeslice]
+            flag_outputs[var][i] = _combine_flag_for_timeslice(
+                vals, meta["kind"], meta["fill"])
 
-            # Flag: nimm den häufigsten Wert im Timeslice (Mode)
-            flag_vals = ds_old["liquid_cloud_flag"].values[timeslice]
-            flag_vals_valid = flag_vals[flag_vals != -2147483647]
+        # ── Generic rate aggregation (mean, not logical combination) ───────────
+        for var, meta in available_rates.items():
+            vals = ds_old[var].values[timeslice]
+            fill = meta["fill"]
+            valid = vals[~np.isnan(vals) & (vals != fill)]
+            if len(valid) > 0:
+                rate_outputs[var][i] = np.nanmean(valid)
 
-            if len(flag_vals_valid) > 0:
-                if 1 in flag_vals_valid:
-                    flags[i] = 1   # cloudy dominiert
-                elif 2 in flag_vals_valid:
-                    flags[i] = 2   # undefined
-                else:
-                    flags[i] = 0   # nur dann clear
+        ###############
+        # 1st: 31 GHz std, 10min before and after scan (zenith-only samples):
+        std10_before, std10_after = std10_before_after_zenith(
+            ds_old, timeslice, ele_var=ele_var, tb_var=tb_var, elevations=elevations)
+        std10_before_list.append(std10_before)
+        std10_after_list.append(std10_after)
 
-            # Rainrate:
-            rain_vals = ds_old["rainfall_rate"].values[timeslice]
-            fill = 9.96921e+36
-            rain_vals_valid = rain_vals[rain_vals != fill]
-            if len(rain_vals_valid) > 0:
-                rainfall[i] = np.nanmean(rain_vals_valid)
-
-        ###
-        # Only for FESSTVaL Foghat / RAO:
+        #########
+        # 2nd: IR TB variable detection (if there):
+        if "tb_irp" in ds_old:
+            ir_var = "tb_irp"
+        elif "irt" in ds_old:
+            ir_var = "irt"
         else:
-            # Bitwise OR: wenn irgendein Zeitschritt ein Bit hat, bleibt es gesetzt
-            flag_vals = ds_old["flag"].values[timeslice]
-            fill = 0  # _FillValue ist 0s
-
-            ###########################
-            # Alternate Nan-Filter:
-            # flag_vals_valid = flag_vals[flag_vals != fill].astype(int)
-            flag_vals_valid = flag_vals[~np.isnan(flag_vals) & (flag_vals != fill)].astype(int)
-            ########################
-
-            if len(flag_vals_valid) > 0:
-                combined = 0
-                for fv in flag_vals_valid:
-                    combined |= int(fv)
-                flags[i] = combined
-            else:
-                flags[i] = 0  # kein gültiger Wert → kein Flag
+            ir_var = None
+            print("No IR TB var found for BL scan — irt will stay NaN.")
 
         ####
         # Always:
         # Average of time over timeslice:
         times = ds_old["time"].values[timeslice]
-        times_ns = times.astype("int64")  
+        times_ns = times.astype("int64")
         mean_ns  = np.nanmean(times_ns)
         mean_time = mean_ns.astype("datetime64[ns]")
         time_array.append(mean_time)
-        
-        # Check one scan of MWR in:
+
+        ###############
+        # 3rd: Ceilometer cloud base — mean over the timeslice's time window:
+        if cloudbases is not None:
+            t_start = times.min()
+            t_end   = times.max()
+            mask = (cloudbases.index >= t_start) & (cloudbases.index <= t_end)
+            vals_in_window = cloudbases.values[mask]
+            if len(vals_in_window) > 0 and not np.all(np.isnan(vals_in_window)):
+                cloudbase_list.append(np.nanmean(vals_in_window))
+            else:
+                cloudbase_list.append(np.nan)
+        else:
+            cloudbase_list.append(np.nan)
+
+        # Check one scan of MWR in (BL scans: fixed azimuth, varying elevation):
         for j in timeslice:
-            k = np.nanargmin(np.abs(elevations-ds_old[ele_var].values[j]))
-            # m = np.nanargmin(np.abs(azimuths-ds_old[azi_var].values[j]))
+            k = np.nanargmin(np.abs(elevations - ds_old[ele_var].values[j]))
             tbs[i, k, :] = ds_old[tb_var].values[j, :]
+            if ir_var is not None:
+                irt[i, k] = ds_old[ir_var].values[j, 0]
 
-    # plt.figure()
-    # plt.pcolormesh(time_array, elevations, tbs[:,:,0].T)
-    # plt.savefig("test_BL.png")
-
-    return time_array, tbs, flags, rainfall
+    return (time_array, tbs, flag_outputs, rate_outputs,
+            np.array(std10_before_list), np.array(std10_after_list),
+            irt, np.array(cloudbase_list))
 
 ###############################################################################
 
-def create_BL_ds(ds_old, time_array, tbs, flags, rainfall,
+def create_BL_ds(ds_old, time_array, tbs, flag_outputs, rate_outputs,
+                 std10_before, std10_after, irt, cloudbases,
                  elevations=elevations,
                  ele_var="ele",
                  tb_var="tb",
@@ -665,107 +693,102 @@ def create_BL_ds(ds_old, time_array, tbs, flags, rainfall,
     """
     Creates an xarray Dataset for Boundary Layer scans (varying elevation,
     fixed azimuth ~0°/North) and optionally saves it to NetCDF.
-
+    Mirrors create_scan_ds, minus the azimuth dimension.
+ 
     Parameters
     ----------
-    ds_old      : xr.Dataset   — original input dataset (for metadata/coords)
-    time_array  : list         — mean datetime64 per scan
-    tbs         : np.ndarray   — shape (n_scans, n_elevations, 14)
-    flags       : np.ndarray   — shape (n_scans,) int cloud/quality flag
-    rainfall    : np.ndarray   — shape (n_scans,) float rainfall rate
-    elevations  : np.ndarray   — elevation angles used as coordinate
-    ele_var     : str          — name of elevation variable in ds_old
-    tb_var      : str          — name of TB variable in ds_old
-    out_file    : str or None  — path to output NetCDF (None = don't save)
-
+    ds_old        : xr.Dataset   — original input dataset (for metadata/coords)
+    time_array    : list         — mean datetime64 per scan
+    tbs           : np.ndarray   — shape (n_scans, n_elevations, 14)
+    flag_outputs  : dict         — {var_name: np.ndarray shape (n_scans,)}
+                                    auto-detected flag variables
+    rate_outputs  : dict         — {var_name: np.ndarray shape (n_scans,)}
+                                    auto-detected rate variables (e.g. rain)
+    std10_before  : np.ndarray   — shape (n_scans,) 31GHz std before scan
+    std10_after   : np.ndarray   — shape (n_scans,) 31GHz std after scan
+    irt           : np.ndarray   — shape (n_scans, n_elevations) IR TB
+    cloudbases    : np.ndarray   — shape (n_scans,) ceilometer cloud base
+    elevations    : np.ndarray   — elevation angles used as coordinate
+    ele_var       : str          — name of elevation variable in ds_old
+    tb_var        : str          — name of TB variable in ds_old
+    out_file      : str or None  — path to output NetCDF (None = don't save)
+ 
     Returns
     -------
     ds_bl : xr.Dataset
     """
-
+ 
     time_array = np.array(time_array, dtype="datetime64[ns]")
-    n_time, n_ele, n_chan = tbs.shape
-
+ 
+    # Determine cloudflags (same logic as create_scan_ds, no azimuth axis here):
+    ceilo_flag = ~np.isnan(cloudbases)
+    std_flag   = (np.asarray(std10_after) > 0.2) | (np.asarray(std10_before) > 0.2)
+    irt_flag   = np.nanmean(irt, axis=1) > 243.15
+    comb_flag  = std_flag | irt_flag
+ 
+    # tbs -> DataArray, damit wir bequem über dims prüfen können
+    tbs_da = xr.DataArray(
+        tbs,
+        dims=("time", "elevation", "N_Channels"),
+        coords={
+            "time": time_array,
+            "elevation": elevations,
+            "N_Channels": np.arange(14) + 1,
+        },
+    )
+    has_data_time = ~np.isnan(tbs_da).all(dim=("elevation", "N_Channels"))
+    has_data_elev = ~np.isnan(tbs_da).all(dim=("time", "N_Channels"))
+    tbs_clean = tbs_da.sel(
+        time=tbs_da.time[has_data_time],
+        elevation=tbs_da.elevation[has_data_elev],
+    )
+ 
     # ── Frequency coordinate from original dataset ────────────────────────────
+    n_chan = tbs.shape[-1]
     if "frequency" in ds_old.coords:
         freqs = ds_old["frequency"].values
-    elif "n_freq" in ds_old.dims:
-        freqs = np.arange(n_chan, dtype=float)
     else:
         freqs = np.arange(n_chan, dtype=float)
-
+ 
     # ── Latitude / Longitude / Altitude scalars from original ─────────────────
     def scalar(var):
         if var in ds_old:
             v = ds_old[var].values.flat[0]
             return float(v) if not np.isnan(float(v)) else np.nan
         return np.nan
-
+ 
     lat = scalar("latitude")
     lon = scalar("longitude")
     alt = scalar("altitude")
-
+    n_time_out = tbs_clean.sizes["time"]
+ 
     # ── Build Dataset ─────────────────────────────────────────────────────────
     ds_bl = xr.Dataset(
         data_vars={
-            # TBs: (time, elevation, frequency)
-            "tb": xr.DataArray(
-                tbs.astype(np.float32),
-                dims=["time", "elevation", "frequency"],
-                attrs={
-                    "units"    : "K",
-                    "long_name": "Microwave brightness temperature",
-                    "standard_name": "brightness_temperature",
-                }
-            ),
-            # Cloud / quality flag: (time,)
-            "liquid_cloud_flag": xr.DataArray(
-                flags.astype(np.int32),
-                dims=["time"],
-                attrs={
-                    "long_name"   : "Liquid cloud flag",
-                    "flag_values" : "0 1 2",
-                    "flag_meanings": "clear cloudy undefined",
-                    "_FillValue"  : -2147483647,
-                }
-            ),
-            # Rainfall rate: (time,)
-            "rainfall_rate": xr.DataArray(
-                rainfall.astype(np.float32),
-                dims=["time"],
-                attrs={
-                    "units"    : "mm/h",
-                    "long_name": "Rainfall rate",
-                }
-            ),
-            # Azimuth: constant 0° (North) for all BL scans
+            "tb": (("time", "elevation", "N_Channels"), tbs_clean.data.astype(np.float32)),
             "azimuth_angle": xr.DataArray(
-                np.zeros(n_time, dtype=np.float32),
-                dims=["time"],
-                attrs={
-                    "units"    : "degrees",
-                    "long_name": "Azimuth angle (fixed North for BL scans)",
-                }
+                np.zeros(n_time_out, dtype=np.float32), dims=["time"],
+                attrs={"units": "degrees",
+                      "long_name": "Azimuth angle (fixed North for BL scans)"}
             ),
-            # Static scalars:
             "latitude": xr.DataArray(
-                np.full(n_time, lat, dtype=np.float32), dims=["time"],
+                np.full(n_time_out, lat, dtype=np.float32), dims=["time"],
                 attrs={"units": "degrees_north", "long_name": "Latitude"}
             ),
             "longitude": xr.DataArray(
-                np.full(n_time, lon, dtype=np.float32), dims=["time"],
+                np.full(n_time_out, lon, dtype=np.float32), dims=["time"],
                 attrs={"units": "degrees_east", "long_name": "Longitude"}
             ),
             "altitude": xr.DataArray(
-                np.full(n_time, alt, dtype=np.float32), dims=["time"],
+                np.full(n_time_out, alt, dtype=np.float32), dims=["time"],
                 attrs={"units": "m", "long_name": "Altitude above sea level"}
             ),
         },
         coords={
-            "time"     : ("time",      time_array),
-            "elevation": ("elevation", elevations.astype(np.float32),
-                          {"units": "degrees", "long_name": "Elevation angle"}),
-            "frequency": ("frequency", freqs.astype(np.float32),
+            "time": tbs_clean.coords["time"],
+            "elevation": tbs_clean.coords["elevation"],
+            "N_Channels": tbs_clean.coords["N_Channels"],
+            "frequency": ("N_Channels", freqs.astype(np.float32),
                           {"units": "GHz", "long_name": "Frequency"}),
         },
         attrs={
@@ -774,17 +797,119 @@ def create_BL_ds(ds_old, time_array, tbs, flags, rainfall,
             "source"     : ds_old.attrs.get("source", ""),
             "scan_type"  : "BL_elevation_scan",
             "azimuth_fixed_deg": "0.0 (North)",
-            "history"    : f"Created by preproc_resample2scan_freq.py",
+            "history"    : "Created by preproc_resample2scan_freq.py",
             "Conventions": "CF-1.8",
         }
     )
-
+ 
+    ####
+    # Generic flag variables:
+    for var_name, flag_vals in flag_outputs.items():
+        flag_masked = np.asarray(flag_vals)[has_data_time.values]
+        if np.all(np.isnan(flag_masked)):
+            continue
+        ds_bl[var_name] = xr.DataArray(
+            flag_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={"units": "1", "long_name": f"{var_name} (auto-aggregated per scan)",
+                  "_FillValue": np.nan,
+                  "comment": "A single flagged sample within the scan sets the whole scan's flag value."}
+        )
+ 
+    ####
+    # Generic rate variables (e.g. rainfall_rate):
+    for var_name, rate_vals in rate_outputs.items():
+        rate_masked = np.asarray(rate_vals)[has_data_time.values]
+        if np.all(np.isnan(rate_masked)):
+            continue
+        ds_bl[var_name] = xr.DataArray(
+            rate_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={"units": "unknown", "long_name": f"{var_name} (mean-aggregated per scan)",
+                  "_FillValue": np.nan}
+        )
+ 
+    ###
+    # std10_before / std10_after:
+    std_before_masked = np.asarray(std10_before)[has_data_time.values]
+    if not np.all(np.isnan(std_before_masked.astype(float))):
+        ds_bl["std10_before"] = xr.DataArray(
+            std_before_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "K",
+                "long_name": "Std of 31 GHz TB (zenith-only) over 10min before scan",
+                "comment": "Computed only from samples with elevation angle == 90°.",
+            }
+        )
+ 
+    std_after_masked = np.asarray(std10_after)[has_data_time.values]
+    if not np.all(np.isnan(std_after_masked.astype(float))):
+        ds_bl["std10_after"] = xr.DataArray(
+            std_after_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "K",
+                "long_name": "Std of 31 GHz TB (zenith-only) over 10min after scan",
+                "comment": "Computed only from samples with elevation angle == 90°.",
+            }
+        )
+ 
+    ###
+    # Ceilometer cloud base:
+    cloudbases_masked = np.asarray(cloudbases)[has_data_time.values]
+    if not np.all(np.isnan(cloudbases_masked.astype(float))):
+        ds_bl["cloudbases"] = xr.DataArray(
+            cloudbases_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "m",
+                "long_name": "Cloudbases from Ceilometer",
+                "comment": "Nan for clear sky, otherwise cbh",
+            }
+        )
+ 
+    ###
+    # Combined cloud flag (Std & IR):
+    comb_flag_masked = np.asarray(comb_flag)[has_data_time.values]
+    if not np.all(np.isnan(comb_flag_masked.astype(bool))):
+        ds_bl["comb_flag"] = xr.DataArray(
+            comb_flag_masked, dims=("time",),
+            coords={"time": tbs_clean.coords["time"]},
+            attrs={
+                "units": "1",
+                "long_name": "combined cloud flag (Std & IR)",
+                "comment": "0 for clear by std<0.2 at 31.4 GHz and mean IR<243.15",
+            }
+        )
+ 
+    ###
+    # Add IR brightness temperature (irt), same spatial structure as tb:
+    irt_da = xr.DataArray(
+        irt,
+        dims=("time", "elevation"),
+        coords={"time": time_array, "elevation": elevations},
+    )
+    irt_clean = irt_da.sel(
+        time=irt_da.time[has_data_time],
+        elevation=irt_da.elevation[has_data_elev],
+    )
+    ds_bl["irt"] = xr.DataArray(
+        irt_clean.data,
+        dims=("time", "elevation"),
+        coords={
+            "time": tbs_clean.coords["time"],
+            "elevation": tbs_clean.coords["elevation"],
+        },
+        attrs={"units": "K", "long_name": "Infrared brightness temperature"}
+    )
+ 
     # ── Save to NetCDF ────────────────────────────────────────────────────────
     if out_file is not None:
         os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
         ds_bl.to_netcdf(out_file)
         print(f"  Saved BL dataset: {out_file}")
-
+ 
     return ds_bl
 
 ###############################################################################
@@ -801,24 +926,27 @@ def resample_mwr_ds_on_scan_freq(ds_old, cloudbases=None):
     #########################
     # 2nd calc mean timestamp and mean measurements for these timeslices
     time_array, tbs, flag_outputs, rate_outputs, std10_before, std10_after,\
-            irt, cloudbases =\
+            irt, cloudbases_out =\
             determine_data_in_time_for_scanset(ds_old,\
             time_indices_list_list, tb_var=tb_var, ele_var=ele_var,\
             azi_var=azi_var, cloudbases=cloudbases) 
-    time_array_bl, tbs_bl, flags_bl, rainfall_bl =\
+    time_array_bl, tbs_bl, flag_outputs_bl, rate_outputs_bl, std10_before_bl, \
+        std10_after_bl, irt_bl, cloudbases_bl = \
             determine_data_in_time_for_BLset(ds_old, BL_time_indices_list_list,\
-            tb_var=tb_var, ele_var=ele_var, azi_var=azi_var)
+            tb_var=tb_var, ele_var=ele_var, azi_var=azi_var, cloudbases=cloudbases)
 
     # 3rd Create new dataset of scans:
     ds_new = create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
-                            std10_before, std10_after, irt,cloudbases,
+                            std10_before, std10_after, irt, cloudbases_out,
                             elevations=elevations, azimuths=azimuths,
                             ele_var=ele_var, tb_var=tb_var, azi_var=azi_var)
-    ds_bl = create_BL_ds(ds_old,time_array_bl, tbs_bl, flags_bl, rainfall_bl,
-                 elevations=elevations,
-                 ele_var=ele_var,
-                 tb_var=tb_var,
-                 out_file=None)
+
+    ds_bl = create_BL_ds(ds_old, time_array_bl, tbs_bl, flag_outputs_bl, rate_outputs_bl,
+                         std10_before_bl, std10_after_bl, irt_bl, cloudbases_bl,
+                         elevations=elevations,
+                         ele_var=ele_var,
+                         tb_var=tb_var,
+                         out_file=None)
 
     return ds_new, ds_bl
 
@@ -848,8 +976,7 @@ if __name__ == "__main__":
 
     cloudbases = extract_lowest_cloud_base(\
             os.path.dirname(args.in_pattern), "ceilo/*_cloudcov.txt")
-
-    print("*********************")
+    print("Cloudbase data added:")
     print(cloudbases)
 
     for i, file in enumerate(files):
