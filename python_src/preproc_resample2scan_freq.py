@@ -42,11 +42,11 @@ def parse_arguments():
         "--in_pattern", "-i",
         type=str,
         # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/*/MWR_1C01_aachen_*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/*/MWR_1C01_sinthern_*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/*/MWR_1C01_vettweiss_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/MWR_1C01_aachen_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/MWR_1C01_sinthern_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
@@ -57,11 +57,11 @@ def parse_arguments():
         "--outfile", "-o",
         type=str,
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc"),
@@ -73,6 +73,79 @@ def parse_arguments():
 # 4th Functions
 ##############################################################################
 
+def extract_lowest_cloud_base(folder, pattern="*.txt"):
+    """
+    Reads all ceilometer/DIAL files matching `pattern` in `folder`, extracts
+    timestamp + lowest valid cloud base height (ignoring FILL_VALUE),
+    and returns one combined, sorted time series.
+
+    Supports two input types (auto-detected by file extension):
+      - .txt : tab-separated ceilometer files with z_first/z_second/... columns
+      - .nc  : DIAL/lidar NetCDF files with variable 'zcb(time, layer)'
+    """
+    files = sorted(
+    glob.glob(os.path.join(folder, pattern + "*_cloudcov.txt")) +
+    glob.glob(os.path.join(folder, pattern + "*vitII_*_dial_l2_humr_*.nc"))
+)
+
+    if not files:
+        raise ValueError(f"No files found matching {pattern} in {folder}")
+
+    all_series = []
+
+    for f in files:
+        if f.endswith(".nc"):
+            # ── DIAL/lidar NetCDF format ──────────────────────────────────────
+            ds = xr.open_dataset(f)
+            if "zcb" not in ds:
+                ds.close()
+                continue
+
+            times = pd.to_datetime(ds["time"].values)
+            zcb_vals = ds["zcb"].values.astype(float)  # (time, layer)
+
+            zcb_fill = ds["zcb"].attrs.get("_FillValue", -99)
+            zcb_vals[zcb_vals == zcb_fill] = np.nan
+
+            lowest_cbh = np.nanmin(zcb_vals, axis=1)
+            # nanmin gibt bei einer Zeile voller NaN eine RuntimeWarning + NaN zurück,
+            # das Ergebnis ist trotzdem korrekt (NaN):
+            lowest_cbh = np.where(np.all(np.isnan(zcb_vals), axis=1), np.nan, lowest_cbh)
+
+            s = pd.Series(lowest_cbh, index=times)
+            ds.close()
+
+        else:
+            # ── Standard ceilometer .txt format ────────────────────────────────
+            df = pd.read_csv(
+                f,
+                sep="\t",
+                comment="#",
+                header=None,
+                names=["t", "ta", "tb", "N_first", "N_second", "N_third", "N_vis",
+                      "N_low", "N_mid", "N_high",
+                      "z_first", "z_second", "z_third", "z_vis",
+                      "z_low", "z_mid", "z_high"],
+            )
+            if df.empty:
+                continue
+
+            times = pd.to_datetime(df["t"], format="%d.%m.%Y %H:%M:%S")
+            heights = df[HEIGHT_COLS].replace(FILL_VALUE, np.nan)
+            lowest_cbh = heights.min(axis=1, skipna=True)
+
+            s = pd.Series(lowest_cbh.values, index=times)
+
+        all_series.append(s)
+
+    if not all_series:
+        raise ValueError(f"No valid cloud base data extracted from {pattern} in {folder}")
+
+    combined = pd.concat(all_series).sort_index()
+    combined.name = "lowest_cloud_base_m"
+    return combined
+
+'''
 def extract_lowest_cloud_base(folder, pattern="*.txt"):
     """
     Reads all ceilometer files matching `pattern` in `folder`, extracts
@@ -113,7 +186,7 @@ def extract_lowest_cloud_base(folder, pattern="*.txt"):
     combined = pd.concat(all_series).sort_index()
     combined.name = "lowest_cloud_base_m"
     return combined
-
+'''
 ##############################################################################
 
 def interpolate_azimuths(ds, ele_var="ele", tb_var="tb"):    
@@ -406,10 +479,14 @@ def determine_data_in_time_for_scanset(ds_old, time_indices_list_list,
 
         # Check one scan of MWR in:
         for j in timeslice:
-            k = np.nanargmin(np.abs(elevations - ds_old[ele_var].values[j]))
-            m = np.nanargmin(np.abs(azimuths - ds_old[azi_var].values[j]))
-            tbs[i, k, m, :] = ds_old[tb_var].values[j, :]
-            irt[i, k, m] = ds_old[ir_var].values[j, 0]
+            try:
+                k = np.nanargmin(np.abs(elevations - ds_old[ele_var].values[j]))
+                m = np.nanargmin(np.abs(azimuths - ds_old[azi_var].values[j]))
+                tbs[i, k, m, :] = ds_old[tb_var].values[j, :]
+                irt[i, k, m] = ds_old[ir_var].values[j, 0]
+            except:
+                print("WARNING: Could not derive indices or TB or IRT for Azi scans!")
+                continue
 
     return (time_array, tbs, flag_outputs, rate_outputs,
             np.array(std10_before_list), np.array(std10_after_list),\
@@ -975,7 +1052,7 @@ if __name__ == "__main__":
     tmp_files_bl = []
 
     cloudbases = extract_lowest_cloud_base(\
-            os.path.dirname(args.in_pattern), "ceilo/*_cloudcov.txt")
+            os.path.dirname(args.in_pattern), "ceilo/")
     print("Cloudbase data added:")
     print(cloudbases)
 
