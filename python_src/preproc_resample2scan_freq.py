@@ -44,9 +44,9 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/tophat_joyce_2025/2025/*/sups_joy_mwr00_l1_tb_p00_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/MWR_1C01_aachen_*.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/MWR_1C01_aachen_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/MWR_1C01_sinthern_*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/MWR_1C01_vettweiss_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
@@ -60,8 +60,8 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_mechat_jun26.nc"),
@@ -89,7 +89,8 @@ def extract_lowest_cloud_base(folder, pattern="*.txt"):
 )
 
     if not files:
-        raise ValueError(f"No files found matching {pattern} in {folder}")
+        return None
+        # raise ValueError(f"No files found matching {pattern} in {folder}")
 
     all_series = []
 
@@ -145,48 +146,6 @@ def extract_lowest_cloud_base(folder, pattern="*.txt"):
     combined.name = "lowest_cloud_base_m"
     return combined
 
-'''
-def extract_lowest_cloud_base(folder, pattern="*.txt"):
-    """
-    Reads all ceilometer files matching `pattern` in `folder`, extracts
-    timestamp + lowest valid cloud base height (ignoring FILL_VALUE=-9999),
-    and returns one combined, sorted time series.
-    """
-    files = sorted(glob.glob(os.path.join(folder, pattern)))
-    if not files:
-        raise ValueError(f"No files found matching {pattern} in {folder}")
-
-    all_series = []
-
-    for f in files:
-        df = pd.read_csv(
-            f,
-            sep="\t",
-            comment="#",
-            header=None,
-            names=["t", "ta", "tb", "N_first", "N_second", "N_third", "N_vis",
-                  "N_low", "N_mid", "N_high",
-                  "z_first", "z_second", "z_third", "z_vis",
-                  "z_low", "z_mid", "z_high"],
-        )
-
-        if df.empty:
-            continue
-
-        # Zeitstempel parsen:
-        times = pd.to_datetime(df["t"], format="%d.%m.%Y %H:%M:%S")
-
-        # Alle Höhen-Spalten: FillValue -> NaN, dann Minimum über die Zeile:
-        heights = df[HEIGHT_COLS].replace(FILL_VALUE, np.nan)
-        lowest_cbh = heights.min(axis=1, skipna=True)
-
-        s = pd.Series(lowest_cbh.values, index=times)
-        all_series.append(s)
-
-    combined = pd.concat(all_series).sort_index()
-    combined.name = "lowest_cloud_base_m"
-    return combined
-'''
 ##############################################################################
 
 def interpolate_azimuths(ds, ele_var="ele", tb_var="tb"):    
@@ -204,7 +163,7 @@ def interpolate_azimuths(ds, ele_var="ele", tb_var="tb"):
 ###############################################################################
 
 def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
-                          max_elev_azi_diff=max_elev_azi_diff, max_ele=85):
+                          max_elev_azi_diff=max_elev_azi_diff, max_ele=87):
     # Output: list of lists, because each scan is one list of indices!
     time_indices_list_list = []
     BL_time_indices_list_list = []
@@ -232,9 +191,11 @@ def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
         # Scan ends:
         elif max_ele<=ele_curr and scan_switch:
             scan_switch = False
-            if len(scan_list)>10: # distinguish BL scans with 10 elevs from Azis at 360°
+            if len(scan_list)>25: # distinguish BL scans with 10 elevs from Azis at 360°
+                # 4fach BL hat aber 40 Werte hintereinander und ein scan nur 36...?
                 #############
-                # print("len(scan_list): ", len(scan_list))
+                #print("ele_curr: ", ele_curr)
+                #print("len(scan_list): ", len(scan_list))
                 #############
                 time_indices_list_list.append(scan_list)
             else:
@@ -538,8 +499,16 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
             "N_Channels": np.arange(14) + 1,
         },
     )
+
+    #exclude timesteps and elevations without content:
     has_data_time    = ~np.isnan(tbs_da).all(dim=("elevation", "azimuth", "N_Channels"))
-    has_data_elev    = ~np.isnan(tbs_da).all(dim=("time", "azimuth", "N_Channels"))
+    min_frac  = 0.05   # at least 10 % of all time steps ...
+    min_count = 10  
+    valid_t = (~np.isnan(tbs_da)).any(dim=("azimuth", "N_Channels"))   # (time, elevation)
+    n_valid = valid_t.sum(dim="time")                                   # (elevation,)
+    n_time  = tbs_da.sizes["time"]
+    has_data_elev = (n_valid >= min_count) | (n_valid >= min_frac * n_time)
+
     tbs_clean = tbs_da.sel(
         time=tbs_da.time[has_data_time],
         elevation=tbs_da.elevation[has_data_elev],
@@ -557,6 +526,7 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
         },
     )
 
+    '''
     ####
     # Generic flag variables:
     for var_name, flag_vals in flag_outputs.items():
@@ -583,6 +553,7 @@ def create_scan_ds(time_array, tbs, flag_outputs, rate_outputs,
             attrs={"units": "unknown", "long_name": f"{var_name} (mean-aggregated per scan)",
                   "_FillValue": np.nan}
         )
+    '''
 
     ###
     # std10_before / std10_after — replaces the old std10_cloud_flag:
