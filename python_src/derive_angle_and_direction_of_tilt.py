@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import matplotlib.ticker as ticker
 import matplotlib
+from scipy.optimize import minimize_scalar
+import warnings
 
 ##############################################################################
 # 2nd Params:
@@ -43,10 +45,10 @@ def parse_arguments():
         type=str,
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26_obs.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         help="Input NetCDF file which is already resampled to scan frequency."
     )
@@ -318,142 +320,168 @@ def calc_TB_diffs_360deg4tilt(azis,pair,args, ang0=30, tilt=0.5):
 
 ###############################################################################
 
-def calc_estimated_tilt(azis,dtbs, pair_labels, args, elevation=30,\
-        azi_pairs=azi_pairs):
 
-    ###
-    # 1st round: 
-    tilts = np.arange(0.01, 2, 0.25) # 20 => ca 8.
-    all_dtbs_mod = np.full((len(azi_pairs), len(tilts), len(dtbs), 14), np.nan)
-    sqr_diffs = np.full((len(azi_pairs), len(tilts)), np.nan)
-    for i, pair in enumerate(azi_pairs):
-        for j, i_tilt in enumerate(tilts):
-            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
-                    ang0=elevation, tilt=i_tilt)
-            all_dtbs_mod[i,j,:,:] = dtbs_mod
-            sqr_diffs[i,j] = np.nanmean((dtbs[:,:]-dtbs_mod[:,:])**2)
+def calc_estimated_tilt(azis, dtbs, pair_labels, args, elevation=30,
+                        azi_pairs=azi_pairs, delta=0.1, chan_weights=None,
+                        k_clip=3.0, max_drop_frac=0.2, n_iter=5,
+                        tilt_max=3.0, refine=True, return_keep=False, verbose=True):
+    """
+    Estimate instrument tilt from an azimuth scan.
 
-    ###
-    #2nd round:
-    flat_index = np.nanargmin(sqr_diffs)
-    i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
-    tilt       = tilts[i_tilt]
+    1) Linearised fit: for every pair the TB response to a small tilt (delta) is computed
+       once; the best tilt per pair follows analytically (least-squares projection).
+    2) Robust outlier removal: azimuths whose RMS residual exceeds median + k_clip*MAD
+       are excluded, refit, repeat until stable (max. max_drop_frac of azimuths dropped).
+    3) Optional nonlinear refinement of the tilt with the full model (bounded Brent)
+       for the best pair and its neighbours.
+
+    Returns: tilt [deg], angle_pair (element of azi_pairs), modelled dTBs (n_azi, n_chan)
+             (+ keep mask per azimuth if return_keep=True)
+    """
+    dtbs = np.array(dtbs, dtype=float)          # copy: caller's array is not modified
+    n_azi, n_chan = dtbs.shape
+    n_pairs = len(azi_pairs)
+    w = np.ones(n_chan) if chan_weights is None else np.asarray(chan_weights, float)
+    azis_arr = np.asarray(azis)
+
+    def label(i):
+        if pair_labels is not None and len(pair_labels) == n_pairs:
+            return pair_labels[i]
+        return azi_pairs[i]
+
+    def model(pair, tilt):
+        return np.asarray(calc_TB_diffs_360deg4tilt(azis, pair, args,
+                                                    ang0=elevation, tilt=tilt), float)
+
+    # ------------------------------------------------------------------
+    # 1) Linear responses: dTB(pair, tau) ~ m0 + tau * R[pair]
+    # ------------------------------------------------------------------
+    m0 = model(azi_pairs[0], 0.0)    # untilted model (if tilt=0 fails, use e.g. 1e-4)
+    R = np.stack([(model(p, delta) - m0) / delta for p in azi_pairs])   # (n_pairs, n_azi, n_chan)
+
+    def linear_fit(keep):
+        y = np.where(keep[:, None], (dtbs - m0) * w, np.nan)
+        taus = np.zeros(n_pairs)
+        cost = np.full(n_pairs, np.inf)
+        for i in range(n_pairs):
+            x = R[i] * w
+            ok = np.isfinite(x) & np.isfinite(y)
+            if not ok.any() or np.sum(x[ok] ** 2) == 0:
+                continue
+            tau = np.clip(np.sum(x[ok] * y[ok]) / np.sum(x[ok] ** 2), 0.0, tilt_max)
+            taus[i] = tau
+            cost[i] = np.mean((y[ok] - tau * x[ok]) ** 2)
+        return taus, cost
+
+    # ------------------------------------------------------------------
+    # 2) Iterative robust clipping of outlier azimuths
+    # ------------------------------------------------------------------
+    keep = np.isfinite(dtbs).any(axis=1)
+    n_min = int(np.ceil((1 - max_drop_frac) * keep.sum()))
+
+    for it in range(n_iter):
+        taus, cost = linear_fit(keep)
+        i_best = int(np.argmin(cost))
+        fit = m0 + taus[i_best] * R[i_best]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            r_azi = np.sqrt(np.nanmean(((dtbs - fit) * w) ** 2, axis=1))
+        valid = np.isfinite(r_azi)
+        med = np.nanmedian(r_azi)
+        mad = 1.4826 * np.nanmedian(np.abs(r_azi - med))
+
+        new_keep = valid & (r_azi <= med + k_clip * mad) if mad > 0 else valid.copy()
+        if new_keep.sum() < n_min:                       # cap number of dropped azimuths
+            new_keep = np.zeros(n_azi, bool)
+            new_keep[np.argsort(np.where(valid, r_azi, np.inf))[:n_min]] = True
+
+        if verbose:
+            print(f"*** iter {it}: pair={label(i_best)}, tilt(lin)={taus[i_best]:.3f}°, "
+                  f"dropped azimuths: {azis_arr[~new_keep & valid]}")
+        if np.array_equal(new_keep, keep):
+            break
+        keep = new_keep
+
+    taus, cost = linear_fit(keep)                        # final linear fit on final mask
+    i_best = int(np.argmin(cost))
+    tilt, i_pair = taus[i_best], i_best
+
+    # ------------------------------------------------------------------
+    # 3) Nonlinear refinement with the full model (best pair + neighbours)
+    # ------------------------------------------------------------------
+    if refine:
+        mask = keep[:, None] & np.isfinite(dtbs)
+
+        def cost_full(pair, tau):
+            r = (dtbs - model(pair, tau)) * w
+            return np.nanmean(r[mask] ** 2)
+
+        best_cost = np.inf
+        for i in range(max(0, i_best - 1), min(n_pairs, i_best + 2)):
+            lo, hi = max(0.0, taus[i] - 0.3), min(tilt_max, taus[i] + 0.3)
+            res = minimize_scalar(lambda t: cost_full(azi_pairs[i], t),
+                                  bounds=(lo, hi), method="bounded",
+                                  options={"xatol": 1e-3})
+            if verbose:
+                print(f"    refine pair={label(i)}: tilt={res.x:.3f}°, cost={res.fun:.4g}")
+            if res.fun < best_cost:
+                best_cost, tilt, i_pair = res.fun, res.x, i
+
     angle_pair = azi_pairs[i_pair]
-    print("First tilt: ", tilt)
-    print("First angle: ", angle_pair )
-    start = np.max([tilt-0.25, 0])
-    star_index_pair = np.max([0, i_pair-1])
-    new_pairs = azi_pairs[star_index_pair : i_pair+1]
-    tilts = np.arange(start, tilt+0.25, 0.01)
-    print("tilts: ", tilts)
-    print("New pairs: ", new_pairs)
-    all_dtbs_mod = np.full((len(new_pairs), len(tilts), len(dtbs), 14), np.nan)
-    sqr_diffs = np.full((len(new_pairs), len(tilts)), np.nan)
-    for i, pair in enumerate(new_pairs):
-        for j, i_tilt in enumerate(tilts):
-            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
-                    ang0=elevation, tilt=i_tilt)
-            all_dtbs_mod[i,j,:,:] = dtbs_mod
-            sqr_diffs[i,j] = np.nanmean((dtbs[:,:]-dtbs_mod[:,:])**2)
+    dtbs_mod = model(angle_pair, tilt)
 
-    # Get minimum difference between tilted model and measured data:
-    flat_index = np.nanargmin(sqr_diffs)
-    i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
-    tilt       = tilts[i_tilt]
-    angle_pair = new_pairs[i_pair]
+    if verbose:
+        print(f"*** Final: tilt={tilt:.3f}°, pair={label(i_pair)}, "
+              f"used {keep.sum()}/{n_azi} azimuths")
 
-    '''
-    ############################################
-    tilts = []
-    sqr_diffs = []
-    i_tilt = 0.3
-    d_tilt = 0.001
-    all_dtbs_mod = np.full((len(azi_pairs), len(dtbs), 14), np.nan)
-    for i, pair in enumerate(azi_pairs):
-        for j in range(50):
-            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
-                    ang0=elevation, tilt=i_tilt+d_tilt)
-            sqr_diff2 = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
-
-            dtbs_mod = calc_TB_diffs_360deg4tilt(azis,pair,args,\
-                    ang0=elevation, tilt=i_tilt)
-            sqr_diff1 = np.nanmean((dtbs[:,mask]-dtbs_mod[:,mask])**2)
-            
-            if (sqr_diff1 / ((sqr_diff2-sqr_diff1)/d_tilt))<=d_tilt:
-                print("Found zero for pair - Iterations:", j)
-                break
-            else:
-                print("Iteration: ", j)
-                print("sqr_diff: ", sqr_diff1)
-                print("tilt: ", i_tilt)
-                print("Gradient: ", ((sqr_diff2-sqr_diff1)/d_tilt))
-                i_tilt = i_tilt - sqr_diff1 / ((sqr_diff2-sqr_diff1)/d_tilt)
-            ##########################
-            # gradient = (sqr_diff2 - sqr_diff1) / d_tilt
-            # i_tilt = i_tilt - learning_rate * gradient   
-            ###########################
-        all_dtbs_mod[i,:,:] = dtbs_mod
-        sqr_diffs.append(sqr_diffs)
-        tilts.append(i_tilt)
-
-    # Get minimum difference between tilted model and measured data:
-    i_pair = np.nanargmin(sqr_diffs)
-    tilt       = tilts[i_pair]
-    angle_pair = azi_pairs[i_pair]
-    ###########################################
-        
-    
-    # Get minimum difference between tilted model and measured data:
-    flat_index = np.nanargmin(sqr_diffs)
-    i_pair, i_tilt = np.unravel_index(flat_index, sqr_diffs.shape)
-    tilt       = tilts[i_tilt]
-    angle_pair = azi_pairs[i_pair]
-    '''
-    return tilt, angle_pair, all_dtbs_mod[i_pair, i_tilt ,:,:]
+    if return_keep:
+        return tilt, angle_pair, dtbs_mod, keep
+    return tilt, angle_pair, dtbs_mod
 
 ##############################################################################
-'''
-def get_channel_mask(dtbs):
-    maxima = np.nanmax(dtbs, axis=0)
-    minima = np.nanmin(dtbs, axis=0)
-    idx_high = np.argsort(maxima)[-2:]   # die 2 größten
-    idx_low  = np.argsort(minima)[:2]    # die 2 kleinsten
-    exclude = np.union1d(idx_high, idx_low)
-    mask = np.ones(dtbs.shape[1], dtype=bool)
-    mask[exclude] = False
-    return mask
-'''
-##############################################################################
 
-def clear_dataset(ds_in):
-    
-    n_time = ds_in.sizes["time"]
-    clear_mask = np.ones(n_time, dtype=bool)  # alle True = behalten
+FLAG_VARS = ["comb_flag", "obs_flag", "rfi_flag"]
 
-    print("****************************")
-    print("CLearing algorithm statrs here:")
-    print(ds_in)
+def clear_dataset(ds0, flag_vars=FLAG_VARS, verbose=True):
+    """Return a copy of ds0 where all numeric data variables are set to NaN
+    wherever any flag in `flag_vars` is active (flag != 0).
+    A flag is applied to a variable only if all flag dims are contained in the variable's dims."""
+    ds = ds0.copy()
 
-    if "liquid_cloud_flag" in ds_in:
-        cf = ds_in["liquid_cloud_flag"].values
-        clear_mask &= (cf == 0)
-    else:
-        print("Info: liquid_cloud_flag nicht im Dataset — kein Cloud-Filter.")
+    # boolean "bad" masks; fillna(0) treats missing flag values as clean
+    bad_masks = {}
+    for f in flag_vars:
+        if f not in ds0:
+            print(f"  [clear_dataset] '{f}' not in dataset, skipped")
+            continue
+        bad_masks[f] = ds0[f].fillna(0) != 0       # robust for int, float and bool flags
 
-    if "rainfall_rate" in ds_in:
-        rr = ds_in["rainfall_rate"].values
-        fill = 9.96921e+36
-        rr_clean = np.where(np.abs(rr) >= fill, 0.0, rr)  # FillValue als 0 behandeln
-        clear_mask &= (rr_clean == 0)
-    else:
-        print("Info: rainfall_rate nicht im Dataset — kein Regen-Filter.")
+    used = set()
+    for var in ds.data_vars:
+        if var in flag_vars:
+            continue
+        da = ds[var]
+        if not np.issubdtype(da.dtype, np.number):  # skip bool, strings, datetimes
+            continue
 
-    n_clear = np.sum(clear_mask)
-    print(f"Zeitschritte gesamt: {n_time} | nach Filter: {n_clear} "
-          f"({100*n_clear/n_time:.1f}% behalten)")
+        mask = None
+        for f, bad in bad_masks.items():
+            if set(bad.dims) <= set(da.dims):
+                mask = bad if mask is None else (mask | bad)
+                used.add(f)
+        if mask is None:
+            continue
 
-    ds_out = ds_in.isel(time=clear_mask)
-    return ds_out
+        ds[var] = da.where(~mask).transpose(*da.dims)
+        if verbose:
+            frac = float(mask.broadcast_like(da).mean())
+            print(f"  [clear_dataset] {var:20s} {100 * frac:5.1f} % set to NaN")
+
+    for f in set(bad_masks) - used:
+        print(f"  [clear_dataset] WARNING: '{f}' {bad_masks[f].dims} matched no variable "
+              f"- check dimension names!")
+    return ds
 
 ##############################################################################
 
@@ -565,27 +593,17 @@ def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
 
 if __name__=="__main__":    
     args = parse_arguments()
+
     ds0 = xr.open_dataset(args.infile)
     i_elev=0 # 30 ° Elevation!
-
     tag=(args.infile).split("/")[-1]
     short_tag = tag.split(".")[0]
 
-    # Exclude clouds & RFI:
+    # Apply Cloud, RFI and obstacle flags:
+    ds = clear_dataset(ds0)
 
-    # 1st exclude clouds (RFI exclusion should be performed on clear sky only!!!
-    # ds = clear_dataset(ds0)
-    ds = ds0
-    ###########
-    # sys.exit()
-    ##########
-
-    # 2nd exclude RFIs!!!!
-    n_before = int(np.sum(~np.isnan(ds.isel(elevation=i_elev)["tb"].values)))
-    rfi_mask_da = derive_rfi_angles(ds)
-    ds["tb"] = ds["tb"].where(rfi_mask_da)    
+    # Tilt derivation:    
     azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
-    # mask = get_channel_mask(dtbs)
     tilt, angle_pair, dtbs_mod = calc_estimated_tilt(azis,dtbs, pair_labels,\
         args, elevation=ds["elevation"].values[i_elev])
 
@@ -593,43 +611,14 @@ if __name__=="__main__":
     # Create a comparison plot: => def function
     plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
         tag=tag, elevation=ds["elevation"].values[i_elev])
-    '''
-    grad = azis
-    theta = np.deg2rad(grad)  # Grad → Radiant
-    plt.figure(figsize=(15,10))
-    plt.title(f"Detected 360° Azimuth instrument tilt: Angle {tilt:.2f}°"
-          f" Between high and low angle: {angle_pair}°")
-    plt.plot(theta[::1], np.nanmean(dtbs[:, :], axis=1), label="Instrument")
-    plt.plot(theta[::1], np.nanmean(dtbs_mod[:,:],axis=1), label="Model")
-    plt.xticks(theta[::5], pair_labels[::5], rotation=45, ha='right')
-    plt.legend()
-    plt.savefig(os.path.expanduser("~/tilt_plot.png"))
-    '''
 
-    ####
-    # calc RFI stats: => def function
-    n_total  = int(np.sum(~np.isnan(ds["tb"].values)))
-    azi_any_excluded  = (~rfi_mask_da).any(dim=["time", "N_Channels"]).values
-    azi_all_excluded  = (~rfi_mask_da).all(dim=["time", "N_Channels"]).values
-    n_azi_total       = len(ds["azimuth"])
-    n_azi_fully_bad   = int(np.sum(azi_all_excluded))
-    n_azi_partly_bad  = int(np.sum(azi_any_excluded)) - n_azi_fully_bad
-    n_azi_clean       = n_azi_total - n_azi_fully_bad - n_azi_partly_bad
 
     ####
     # Datafile: => def function
     with open(os.path.expanduser("~/tilt_detection_"+short_tag+".txt"), "w") as f:
         f.writelines("Tilt: "+str(tilt)+"°\n") 
         f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
-        f.writelines(f"\nDatenpunkte: vorher={n_before}, nachher={n_total}, "
-          f"ausgeschlossen={n_before - n_total} "
-          f"({100*(n_before-n_total)/n_before:.1f}%)")
-        f.writelines(f"\nAzimuthe gesamt: {n_azi_total} | "
-          f"komplett ausgeschlossen: {n_azi_fully_bad} | "
-          f"teilweise ausgeschlossen: {n_azi_partly_bad} | "
-          f"vollständig valide: {n_azi_clean}")
-        f.writelines(f"\nRFI assumed by more than {n_sigmas_rfi} sigmas of scan.")
-
+      
     #################
 
     # I probably should exclude obstacles!!!
@@ -643,7 +632,6 @@ if __name__=="__main__":
 
 
     ##############
-    # 2. What can I do to exclude general Water Vapor features of the landscape...?
     # 3. get another profile from a radiosonde instead of pure clim! => or mean profile of these TBs...
     # 4. Add newtons method to determine tilt value instead of monte carlo!
 

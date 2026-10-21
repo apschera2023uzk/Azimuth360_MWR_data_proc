@@ -8,6 +8,7 @@ import xarray as xr
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import argparse
 import os
 import sys
@@ -21,6 +22,7 @@ import matplotlib.ticker as ticker
 import matplotlib
 import gc
 import pandas as pd
+import warnings
 
 ##############################################################################
 # 2nd Params:
@@ -263,14 +265,10 @@ def determine_obstacle_probability(ds, i_elev,
     # ref_min = np.nanmean(np.nanmin(tb, axis=1)) # 
     # ref_min = np.nanmean(np.nanpercentile(tb, 7.5, axis=1))
     # ref_min = np.nanmin(np.nanpercentile(tb, 7.5, axis=0), axis=0) # ch x azi
-    ref_min = np.nanpercentile(np.nanpercentile(tb, 15. ,axis=0), 15.,axis=0)
+    ref_min = np.nanpercentile(np.nanmean(tb[:,4:6], axis=1), 15.,axis=0)
     # Averaged above time 2.5 percentile along azimuths
     tb_mean = np.nanmean(tb, axis=0)   # mean by time for 72 azimuths!
     tb_std  = np.nanstd(tb,  axis=0)   # std by time for 72 azimuths
-
-    print("ref_min :;", np.shape(ref_min ))
-    print("tb_mean: ", np.shape(tb_mean))
-    print("tb_std: ", np.shape(tb_std))
 
     # Median correlation of each azimuth with all other azimuths (over time):
     #corr = pd.DataFrame(tb).corr(min_periods=10).values   # (72, 72), NaN-robust pairwise
@@ -328,7 +326,7 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
 
 '''
 def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
-                           obstacle_flag, azimuth, elevations,
+                           obstacle_flag,rfi_flag, azimuth, elevations,
                            outpath="/home/aki/PhD_plots/", tag=""):
     """
     4-panel colorplot: x=azimuth, y=elevation, color=mean over K-band (Ch 1-7)
@@ -338,18 +336,43 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
     overmin_2d  = np.nanmean(overmin_ele_azi[:, :, 0:7],  axis=2)  # (elev, azi)
     overmod_2d  = np.nanmean(overmod_ele_azi[:, :, 0:7],  axis=2)
     std_2d      = np.nanmean(std_ele_azi[:,    :, 0:7],   axis=2)
-    #flag_2d     = np.nanmax( obstacle_flag[:,  :, 0:7],   axis=2)  # flag if ANY channel flagged
+    rfi_flag_2d = np.nanmean(rfi_flag[:,    :, :],   axis=2)
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+    # Anzahl der Kanäle:
+    n_flag = np.ma.masked_equal(rfi_flag.sum(axis=-1), 0)   # 0 -> transparent
+    n_chan = rfi_flag.shape[-1]
+    # in deiner Liste:
+    
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f"Obstacle detection — all elevations — K-band mean (Ch 1–7)  [{tag}]",
                  fontsize=14, fontweight="bold")
 
     plots = [
         (axes[0, 0], overmin_2d,        "Deviation from min TB mean [K]",   "RdYlGn_r", 0, 100),
         (axes[0, 1], overmod_2d,        "Deviation from RTTOV model [K]",   "bwr", -80, 80),
-        (axes[1, 0], std_2d,            "Temporal std of TB [K]",            "viridis",   0,    40),
+        (axes[1, 0], std_2d,            "Temporal std of TB [K] max: "+str(np.nanmax(std_2d)),            "viridis",   0,    40),
         (axes[1, 1], obstacle_flag.astype(float), "Obstacle flag (1=obstacle)",    "Reds",      0,    1),
+        (axes[1, 2], n_flag, "RFI: # betroffene Kanäle", plt.get_cmap("viridis_r", n_chan), 0.5, n_chan + 0.5),
+
     ]
+
+    ######################
+    ax = axes[0, 2]
+    # Anzahl geflaggter Elevationen pro (Azimut, Kanal) -> Form (n_azi, n_chan)
+    n_ele = rfi_flag.shape[0]
+    n_blocked = np.ma.masked_equal(rfi_flag.sum(axis=0), 0)    # 0 -> transparent
+
+    pm = ax.pcolormesh(azimuth, np.arange(14)+1, n_blocked.T,
+                       cmap=plt.get_cmap("plasma", n_ele), vmin=0.5, vmax=n_ele + 0.5,
+                       shading="nearest")
+    ax.set_yticks(np.arange(14))
+    ax.axhline(6.5, color="k", lw=0.8)                         # Trennlinie K-/V-Band
+    ax.set(xlabel="Azimut [°]", ylabel="Frequenz [GHz]", title="RFI: Anzahl geflaggter Elevationen")
+    cb = fig.colorbar(pm, ax=ax, label="# Elevationen")
+    cb.locator = mpl.ticker.MaxNLocator(integer=True)
+    cb.update_ticks()
+    ######################
 
     for ax, data, title, cmap, vmin, vmax in plots:
         im = ax.pcolormesh(azimuth, elevations, data,
@@ -363,7 +386,7 @@ def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
         ax.set_yticks(elevations)
 
     plt.tight_layout()
-    plt.savefig(outpath+f"obstacle_plot_{tag}.png", dpi=200, bbox_inches="tight")
+    plt.savefig(outpath+f"obstacle_rfi/obstacle_plot_{tag}.png", dpi=200, bbox_inches="tight")
     plt.close()
 
 ##############################################################################
@@ -386,9 +409,9 @@ if __name__=="__main__":
         # median_correlation = np.full((len(ds["elevation"]), len(ds["azimuth"])), np.nan)
 
         # Calculate model TBs by elevation:
-        tbs_mod_cache = {}
-        for ele in ds["elevation"].values:
-            tbs_mod_cache[ele] = get_TBref4elev(args, elevation=ele, model="RTTOV-gb")
+        #tbs_mod_cache = {}
+        # for ele in ds["elevation"].values:
+            #tbs_mod_cache[ele] = get_TBref4elev(args, elevation=ele, model="RTTOV-gb")
 
         ################
         # LOOP BY ELEVS STARTS:
@@ -396,57 +419,53 @@ if __name__=="__main__":
             print("*****")
             print(i_elev, ele)
 
-            tbs_mod = tbs_mod_cache[ele]
+            # tbs_mod = tbs_mod_cache[ele]
             overmin_azi, overmod_azi, azi_stds, p2dot5 =\
                 determine_obstacle_probability(\
-                    ds, i_elev, tbs_mod=tbs_mod)
+                    ds, i_elev) # excluding model: , tbs_mod=tbs_mod
 
             # Save results:
             overmin_ele_azi[i_elev, :,:] = overmin_azi
-            overmod_ele_azi[i_elev, :, :] = overmod_azi
+            # overmod_ele_azi[i_elev, :, :] = overmod_azi
             std_ele_azi[i_elev, :, :] = azi_stds
             # median_correlation[i_elev, :] = azi_med_corr
 
-            print("obstacle_flag[i_elev, :]", np.shape(obstacle_flag))
-            print("overmin_azi", np.shape(overmin_azi))
-
             obstacle_flag[i_elev, :] = np.where(
-                (overmin_azi[:,6] > 25,
-                1, 0
+                # (np.nanmean(overmin_azi[:,4:6],axis=1) < -23) |
+                (np.nanmean(overmin_azi[:,4:6],axis=1) > 20),
+                 1, 0
             )
 
-
+            # RFI flag:
+            #thr = np.array([30, 30, 25, 25, 20, 17, 15,      # K-Band (Kanäle 0–6)
+            #                 6.5,  6,  6,  6.5,  6.5,  6.5,  6.5])      # V-Band (Kanäle 7–13)
             rfi_flag[i_elev, :, :] = np.where(
-                (overmin_azi[:,:] > 25 |
-                (azi_stds    < thrs_std_low), 
+                # (overmin_azi <  -25) |
+                (azi_stds >  40), 
                 1, 0
             )
+        # Ne, das ist es noch nichts - Foghat sieht in diesem Setup scheiße aus...
 
 
-            '''
-
-            obstacle_flag[i_elev, :] = np.where(
-                (overmin_azi > 20) |
-                (overmod_azi > threshold_mod) |
-                (azi_stds    < thrs_std_low), 
-                # (azi_stds > thrs_std_hgh),
-                # (azi_med_corr    < 0.9),
-                1, 0
-            )
-            '''
-            
-            # Last time I was busy here...
-            # For airport data somehow all three flags work fine by themselves, but not together...
-            # Why???
-            #################
-        # LOOP BY ELEV ENDS
-        ###################
+        '''
+        # Figure Stds by channel:
+        tag = os.path.basename(site_file).split(".")[0]
+        outpath = "/home/aki/PhD_plots/"
+        for i in range(14): 
+            ele_mittel = std_ele_azi[2,:,i]       
+            plt.figure(figsize=(16,9))
+            plt.title("std mean by elevation histogram: "+tag+" Channel: "+str(i+1))
+            plt.hist(ele_mittel.flatten())
+            plt.tight_layout()
+            plt.savefig(outpath+f"obstacle_rfi/rfi_{tag}_{i}.png", dpi=200, bbox_inches="tight")
+            plt.close()
+        '''
 
         ####
         # 2nd create colorplots of stds; overshots and flag
         plot_obstacle_overview(
             overmin_ele_azi, overmod_ele_azi, std_ele_azi,
-            obstacle_flag,\
+            obstacle_flag,rfi_flag,\
             azimuth=ds["azimuth"].values,
             elevations=ds["elevation"].values,
             tag=os.path.basename(site_file).split(".")[0]
@@ -463,6 +482,17 @@ if __name__=="__main__":
             },
             attrs={"long_name": "Obstacle flag", "units": "1",
                    "comment": "1=obstacle detected, 0=clean"}
+        )
+
+        ds["rfi_flag"] = xr.DataArray(
+            rfi_flag,
+            dims=["elevation", "azimuth", "N_Channels"],
+            coords={
+                "elevation":  ds["elevation"],
+                "azimuth":    ds["azimuth"],
+            },
+            attrs={"long_name": "Radio Frequency Interference flag", "units": "1",
+                   "comment": "1=interference detected, 0=clean"}
         )
 
         ds.to_netcdf(site_file.replace(".nc", "_obs.nc"))
