@@ -43,13 +43,13 @@ def parse_arguments():
     parser.add_argument(
         "--infile", "-i",
         type=str,
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202408_obs.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26_obs.nc"),
         default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26_obs.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26_obs.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08_obs.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26_obs.nc"),
+        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26_obs.nc"),
         help="Input NetCDF file which is already resampled to scan frequency."
     )
     # ./derive_angle_and_direction_of_tilt.py --infile /home/aki/PhD_data/scans/MWR_scans_RAO_Foghat_202105_08.nc
@@ -133,29 +133,10 @@ def get_rttov_outputs(rttovgb_outfile=\
     print("Reading in RTTOV-gb output from: ", rttovgb_outfile)
     
     tbs = np.full((n_azis,14), np.nan)
-    '''
-    trans = np.full((batch_size, 14,10,2), np.nan)
-    # time, channel, elevation, crop
-    trans_by_lev=np.full((batch_size,n_levels, 14, 10,2 ), np.nan)
-    # time, level, channel, elevation, crop
-    jacs_by_lev=np.full((batch_size, n_levels, 14, 10,2, 4), np.nan)
-    # time, level, channel, elevation, crop, variable (last one removed in ds)
-    '''
     
     switch = False
     tb_string = ""
     switch_count = 0
-    '''
-    switch_t = False
-    sw_trans_by_lev=False
-    sw_jacs_by_lev=False
-    switcht_count = 0
-    sw_c_trans_by_lev = 0
-    sw_c_jacs_by_lev = 0
-    trans_string = ""
-    string_jc_by_lev=""
-    string_tr_by_lev = ""
-    '''
 
     file = open(rttovgb_outfile, "r")
     
@@ -177,71 +158,6 @@ def get_rttov_outputs(rttovgb_outfile=\
             tb_string = ""
             switch_count = 0
             tbs[prof_idx,:] = np.array(tbs_rs)
-            # print("prof_idx: ",prof_idx)
-            # print("TBs rs: ", np.array(tbs_rs))
-
-            
-    '''
-        # Read in Tot Transmittances:     
-        if switch_t and switcht_count<2:
-            switcht_count+= 1
-            trans_string+= line
-        elif "CALCULATED SURFACE TO SPACE TRANSMITTANCE:" in line:
-            switch_t = True
-        elif switch_t:
-            switch_t = False
-            liste = trans_string.split(" ")
-            tot_trans_by_chan = [float(s.strip("\n")) for s in liste if s.strip() != ""]
-            trans_string = ""
-            switcht_count = 0
-            trans[rs_time_idx, :, ele_idx, crop_idx]=np.array(tot_trans_by_chan)
-          
-        # Read in Lev Transmittances:   
-        if sw_trans_by_lev and sw_c_trans_by_lev<n_levels:
-            sw_c_trans_by_lev+= 1
-            string_tr_by_lev+= line
-        elif "Level to surface transmittances for channels" in line:
-            sw_trans_by_lev = True
-        elif sw_trans_by_lev:
-            sw_trans_by_lev = False
-            liste = string_tr_by_lev.split("\n")[1:]  #.split(" ")
-            for j, line in enumerate(liste):
-                list_of_numbers = line.split(" ")
-                trans_by_lev1 = [float(s) for s in list_of_numbers if s.strip() != "" and s.strip() != "**"]
-                if len(trans_by_lev1)<4:
-                    break
-                elif 4<=len(trans_by_lev1)<5:
-                    trans_by_lev[rs_time_idx, j,10:, ele_idx, crop_idx]=\
-                        np.array(trans_by_lev1)
-                elif 5<=len(trans_by_lev1)<6:
-                    trans_by_lev[rs_time_idx, j,10:, ele_idx, crop_idx] =\
-                        np.array(trans_by_lev1[1:])                  
-                elif j<99:
-                    trans_by_lev[rs_time_idx, j,:10, ele_idx, crop_idx] =\
-                        np.array(trans_by_lev1[1:])
-                else:
-                    trans_by_lev[rs_time_idx, j,:10, ele_idx, crop_idx] =\
-                        np.array(trans_by_lev1)            
-            string_tr_by_lev = ""
-            sw_c_trans_by_lev = 0              
-        
-        # Read in Jacobians somehow:       
-        if "Channel        " in line:
-            sw_jacs_by_lev = True
-            ch_idx = int(line.split("Channel")[-1])-1
-        if sw_jacs_by_lev and sw_c_jacs_by_lev<n_levels+3:
-            sw_c_jacs_by_lev+= 1
-            string_jc_by_lev+= line
-        elif sw_jacs_by_lev:
-            liste = string_jc_by_lev.split("\n")[3:n_levels+3]
-            for j, line in enumerate(liste):
-                werte = line.split()
-                jacs_by_lev[rs_time_idx, j, ch_idx, ele_idx, crop_idx, :]=\
-                    werte[1:]
-            string_jc_by_lev=""
-            sw_jacs_by_lev = False
-            sw_c_jacs_by_lev= 0
-    '''
             
     file.close()
     print("Finished reading RTTOV-gb output from: ", rttovgb_outfile)
@@ -485,42 +401,9 @@ def clear_dataset(ds0, flag_vars=FLAG_VARS, verbose=True):
 
 ##############################################################################
 
-def adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi):
-    # std über alle Azimuthe pro (time, channel):
-    std_per_chan = np.nanstd(scan_diffs, axis=1, keepdims=True)  # (time,1,chan)
-    mean_per_chan = np.nanmean(scan_diffs, axis=1, keepdims=True)
-    threshold = mean_per_chan + n_sigma * std_per_chan
-    return scan_diffs < threshold  # True = no RFI
-
-##############################################################################
-
-def derive_rfi_angles(ds, i_elev=0, n_sigmas_rfi=n_sigmas_rfi):
-    
-    # Extract array once and use numpy operations afterwards for speed up:
-    tb_all = ds["tb"].isel(elevation=i_elev).values  # (time, azimuth, N_Channels)
-
-    # vectorized operation for scan_diffs:
-    minima_by_chan = np.nanmin(tb_all, axis=1, keepdims=True)  # (time, 1, N_Channels)
-    scan_diffs     = tb_all - minima_by_chan                    # (time, azimuth, N_Channels)
-
-    #Calc and apply threshold:
-    rfi_mask = adaptive_threshold(scan_diffs, n_sigma=n_sigmas_rfi) 
-
-    rfi_mask_da = xr.DataArray(
-        rfi_mask,
-        dims=["time", "azimuth", "N_Channels"],
-        coords={
-            "time":       ds["time"],
-            "azimuth":    ds["azimuth"],
-            "N_Channels": ds["N_Channels"],
-        }
-    )
-    return rfi_mask_da
-
-##############################################################################
-
 def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
-        save_path=os.path.expanduser("~/tilt_plot_"),tag="", elevation=90):
+        save_path=os.path.expanduser("~/PhD_plots/tilts/tilt_plot_"),tag="",\
+        elevation=90):
 
     grad  = azis
     theta = np.deg2rad(grad)
@@ -583,9 +466,60 @@ def plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
         ax.axvline(ang, color="#c0392b", lw=0.8, ls=":", alpha=0.6)
 
     fig.tight_layout()
-    fig.savefig(save_path+short_tag+".png", dpi=300, bbox_inches="tight")
+    fig.savefig(save_path+short_tag+"_"+str(elevation)+".png",dpi=300,\
+        bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved: {save_path}"+short_tag+".png")
+    print(f"Saved: {save_path}"+short_tag+"_"+str(elevation)+".png")
+
+    ########
+    # ══════════════════════════════════════════════════════════════════════════
+    # 2nd plot: observed differences corrected by the modelled tilt signal
+    # ══════════════════════════════════════════════════════════════════════════
+    y_corr = np.nanmean(dtbs - dtbs_mod, axis=1)            # (azimuth,)
+
+    rms_before = np.sqrt(np.nanmean(y_meas ** 2))
+    rms_after  = np.sqrt(np.nanmean(y_corr ** 2))
+
+    fig, ax = plt.subplots(figsize=(16, 9))
+
+    ax.plot(grad, y_meas,
+            color="#1f4e79", lw=1.2, marker="o", ms=2.5, alpha=0.35,
+            label=f"Observed TB difference (RMS {rms_before:.2f} K)")
+    ax.plot(grad, y_corr,
+            color="#117a65", lw=1.8, marker="o", ms=3.5,
+            label=f"Tilt-corrected TB difference (RMS {rms_after:.2f} K)")
+
+    ax.axhline(0, color="0.4", lw=0.8, ls=":")
+
+    # ── Axes ─────────────────────────────────────────────────────────────────
+    ax.set_xlim(grad.min(), grad.max())
+    ax.set_xlabel("Azimuth angle [°]", fontsize=14)
+    ax.set_ylabel(r"Mean $\Delta T_\mathrm{B}$ [K]", fontsize=14)
+
+    ax.set_xticks(grad[::5])
+    ax.set_xticklabels(pair_labels[::5], rotation=45, ha='right', fontsize=10)
+
+    ax.yaxis.set_minor_locator(ticker.AutoMinorLocator(2))
+
+    # ── Annotations ──────────────────────────────────────────────────────────
+    ax.set_title(
+        f"Azimuthal brightness temperature differences after tilt correction ({short_tag} / elevation: {elevation}°)\n"
+        f"Removed tilt signal: {tilt:.2f}°   |   "
+        f"RMS reduced from {rms_before:.2f} K to {rms_after:.2f} K "
+        f"({100 * (1 - rms_after / rms_before):.0f} %)",
+        fontsize=13, pad=12, loc="left"
+    )
+
+    ax.legend(loc="upper right", fontsize=12)
+
+    for ang in angle_pair:
+        ax.axvline(ang, color="#c0392b", lw=0.8, ls=":", alpha=0.6)
+
+    fig.tight_layout()
+    fig.savefig(save_path+short_tag+"_"+str(elevation)+"_corr.png", dpi=300,\
+        bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {save_path}"+short_tag+"_"+str(elevation)+"_corr.png")
 
 ##############################################################################
 # 5th Main code:
@@ -595,45 +529,77 @@ if __name__=="__main__":
     args = parse_arguments()
 
     ds0 = xr.open_dataset(args.infile)
-    i_elev=0 # 30 ° Elevation!
+
     tag=(args.infile).split("/")[-1]
     short_tag = tag.split(".")[0]
+    dtbs_mod_all_elevs = np.full((len(ds0["elevation"]), len(ds0["azimuth"]),14), np.nan)
 
     # Apply Cloud, RFI and obstacle flags:
     ds = clear_dataset(ds0)
-
+    
+    ###
     # Tilt derivation:    
-    azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
-    tilt, angle_pair, dtbs_mod = calc_estimated_tilt(azis,dtbs, pair_labels,\
-        args, elevation=ds["elevation"].values[i_elev])
+    # i_elev=0 # 30° at Joyhat viti / 15° at Vettweiss vitII
+    for i_elev, ele in enumerate(ds["elevation"].values):
+        azis,dtbs, pair_labels = get_TB_opposite_differences(ds, i_elev=i_elev)
+        tilt, angle_pair, dtbs_mod = calc_estimated_tilt(azis,dtbs, pair_labels,\
+            args, elevation=ds["elevation"].values[i_elev])
+
+        # Create a comparison plot: => def function
+        plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
+            tag=tag, elevation=ds["elevation"].values[i_elev])
+
+        # Datafile: => def function
+        with open(os.path.expanduser("~/PhD_plots/tilts/tilt_detection_"+\
+                short_tag+"_"+str(ele)+".txt"), "w") as f:
+            f.writelines("Tilt: "+str(tilt)+"°\n") 
+            f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
+
+        # Add this elevation to correction mask:
+        dtbs_mod_all_elevs[i_elev,:,:] = -dtbs_mod
+        # Later the correction should use tilt derived from all elevations together and not by themselves...
+        #######
 
     ####
-    # Create a comparison plot: => def function
-    plot_tilt_comparison(azis, dtbs, dtbs_mod, tilt, angle_pair,\
-        tag=tag, elevation=ds["elevation"].values[i_elev])
+    # ADDING CORRECTION:
+    ds["tilt_corr"] = xr.DataArray(
+        dtbs_mod_all_elevs,
+        dims=["elevation", "azimuth", "N_Channels"],
+        coords={
+            "elevation":  ds["elevation"],
+            "azimuth":    ds["azimuth"],
+            "N_Channels":    ds["N_Channels"],
+        },
+        attrs={"long_name": "tilt correction", "units": "K",
+               "comment": "Add this mask from TBs to receive tilt corrected values"}
+    )
+    '''
+    tb_tilt_corr = np.full((len(ds0["time"]),len(ds0["elevation"]),\
+        len(ds0["azimuth"]),14), np.nan)
+    for i in range(len(ds0["time"])):
+        tb_tilt_corr[i,:,:,:] = tb[i,:,:,:]+dtbs_mod_all_elevs
+    '''
+    tb_tilt_corr = ds["tb"].values + dtbs_mod_all_elevs            # (time, ele, azi, 14) + (ele, azi, 14)
+    ds["tb_tilt_corr"] = xr.DataArray(
+        tb_tilt_corr,
+        dims=ds["tb"].dims, 
+        coords=ds["tb"].coords,
+        attrs={"long_name": "tilt correction", "units": "K",
+               "comment": "Add this mask from TBs to receive tilt corrected values"}
+    )
+    # Remember: That TBs in l1 are not on this grid - you have to apply the correction to
+    # tb (time x freq) and elevation (time) later!    
 
-
-    ####
-    # Datafile: => def function
-    with open(os.path.expanduser("~/tilt_detection_"+short_tag+".txt"), "w") as f:
-        f.writelines("Tilt: "+str(tilt)+"°\n") 
-        f.writelines("Angle_pair: "+str(angle_pair)+"°\n")
-      
-    #################
-
-    # I probably should exclude obstacles!!!
-
-    # Tilt timeseries!!!
-
-    # CORRECTION!!!
-    # For correction i probably have to save the dtbs_mod to subtract them from
-    # a measurement...
-    # 0th add corrected dataset with correction mask NetCDF...
-
+    site_file = args.infile
+    ds.to_netcdf(site_file.replace("_obs.nc", "_tiltcorr.nc"))
+    ds.close()
+    del ds
 
     ##############
+    # 0th add corrected dataset with correction mask NetCDF...
+    # Tilt timeseries!!!
     # 3. get another profile from a radiosonde instead of pure clim! => or mean profile of these TBs...
-    # 4. Add newtons method to determine tilt value instead of monte carlo!
+    # Understand current algorithm to find tilt :D
 
 
 

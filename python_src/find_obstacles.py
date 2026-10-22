@@ -259,72 +259,21 @@ def determine_obstacle_probability(ds, i_elev,
     # working with ch 1 so far but 6 or 7 could also work (less opaque!)
     tb = ds_clear["tb"].isel(elevation=i_elev).values
 
-    # Referenz: Mittleres Minimum im Scan; mittlere TBs pro Azimuth
-    # und mittlere Std pro azimuth
-    # ref_min = np.nanmean(np.sort(tb, axis=1)[:, 2])
-    # ref_min = np.nanmean(np.nanmin(tb, axis=1)) # 
-    # ref_min = np.nanmean(np.nanpercentile(tb, 7.5, axis=1))
-    # ref_min = np.nanmin(np.nanpercentile(tb, 7.5, axis=0), axis=0) # ch x azi
+    # reference minimum is derived as: mean over time 15th percentile over azimuth:
     ref_min = np.nanpercentile(np.nanmean(tb[:,4:6], axis=1), 15.,axis=0)
-    # Averaged above time 2.5 percentile along azimuths
-    tb_mean = np.nanmean(tb, axis=0)   # mean by time for 72 azimuths!
-    tb_std  = np.nanstd(tb,  axis=0)   # std by time for 72 azimuths
 
-    # Median correlation of each azimuth with all other azimuths (over time):
-    #corr = pd.DataFrame(tb).corr(min_periods=10).values   # (72, 72), NaN-robust pairwise
-    #np.fill_diagonal(corr, np.nan)                        # exclude self-correlation
-    #azi_med_corr = np.nanmedian(corr, axis=1)             # (72,)
+    # Averaged above time (azi x chan == 72 x 14 for HATPRO):
+    tb_mean = np.nanmean(tb, axis=0)   
+    tb_std  = np.nanstd(tb,  axis=0)
 
     overmin_azi = tb_mean - ref_min          
     overmod_azi = tb_mean - tbs_mod
     azi_stds    = tb_std                                     
-    p2dot5 = np.nanpercentile(tb_mean, 2.5, axis=0)
 
-    return overmin_azi, overmod_azi, azi_stds, p2dot5 #, azi_med_corr
+    return overmin_azi, overmod_azi, azi_stds
 
 ##############################################################################
-'''
-def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
-                           obstacle_flag, azi_med_corr,  azimuth, elevations,
-                           outpath="/home/aki/PhD_plots/", tag=""):
-    """
-    4-panel colorplot: x=azimuth, y=elevation, color=mean over K-band (Ch 1-7)
-    One single plot covering all elevations and azimuths.
-    """
-    # Mean over K-band channels (index 0-6):
-    #overmin_2d  = np.nanmean(overmin_ele_azi,  axis=2)  # (elev, azi)
-    #overmod_2d  = np.nanmean(overmod_ele_azi[:, :, 0:7],  axis=2)
-    #std_2d      = np.nanmean(std_ele_azi[:,    :, 0:7],   axis=2)
-    #flag_2d     = np.nanmax( obstacle_flag[:,  :, 0:7],   axis=2)  # flag if ANY channel flagged
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle(f"Obstacle detection — all elevations — K-band mean (Ch 1–7)  [{tag}]",
-                 fontsize=14, fontweight="bold")
-
-    plots = [
-        (axes[0, 0], overmin_ele_azi,        "Deviation from min TB mean [K]",   "RdYlGn_r", 0, 100),
-        (axes[0, 1], overmod_ele_azi,        "Deviation from RTTOV model [K]",   "bwr", -80, 80),
-        (axes[1, 0], std_ele_azi,            "Temporal std of TB [K]",            "viridis",   0,    40),
-        (axes[1, 1], obstacle_flag.astype(float), "Obstacle flag (1=obstacle)",    "Reds",      0,    1),
-        (axes[1, 2], azi_med_corr, "Median correlation",    "Reds",      0.75,    1),
-    ]
-
-    for ax, data, title, cmap, vmin, vmax in plots:
-        im = ax.pcolormesh(azimuth, elevations, data,
-                           cmap=cmap, vmin=vmin, vmax=vmax,
-                           shading="auto")
-        plt.colorbar(im, ax=ax)
-        ax.set_title(title, fontsize=12)
-        ax.set_xlabel("Azimuth [°]")
-        ax.set_ylabel("Elevation [°]")
-        ax.set_xticks(np.arange(0, 361, 30))
-        ax.set_yticks(elevations)
-
-    plt.tight_layout()
-    plt.savefig(outpath+f"obstacle_plot_{tag}.png", dpi=200, bbox_inches="tight")
-    plt.close()
-
-'''
 def plot_obstacle_overview(overmin_ele_azi, overmod_ele_azi, std_ele_azi,
                            obstacle_flag,rfi_flag, azimuth, elevations,
                            outpath="/home/aki/PhD_plots/", tag=""):
@@ -406,12 +355,6 @@ if __name__=="__main__":
         std_ele_azi = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
         obstacle_flag = np.full((len(ds["elevation"]), len(ds["azimuth"])), np.nan) 
         rfi_flag = np.full((len(ds["elevation"]), len(ds["azimuth"]),14), np.nan)
-        # median_correlation = np.full((len(ds["elevation"]), len(ds["azimuth"])), np.nan)
-
-        # Calculate model TBs by elevation:
-        #tbs_mod_cache = {}
-        # for ele in ds["elevation"].values:
-            #tbs_mod_cache[ele] = get_TBref4elev(args, elevation=ele, model="RTTOV-gb")
 
         ################
         # LOOP BY ELEVS STARTS:
@@ -420,7 +363,7 @@ if __name__=="__main__":
             print(i_elev, ele)
 
             # tbs_mod = tbs_mod_cache[ele]
-            overmin_azi, overmod_azi, azi_stds, p2dot5 =\
+            overmin_azi, overmod_azi, azi_stds =\
                 determine_obstacle_probability(\
                     ds, i_elev) # excluding model: , tbs_mod=tbs_mod
 
@@ -428,11 +371,10 @@ if __name__=="__main__":
             overmin_ele_azi[i_elev, :,:] = overmin_azi
             # overmod_ele_azi[i_elev, :, :] = overmod_azi
             std_ele_azi[i_elev, :, :] = azi_stds
-            # median_correlation[i_elev, :] = azi_med_corr
 
             obstacle_flag[i_elev, :] = np.where(
                 # (np.nanmean(overmin_azi[:,4:6],axis=1) < -23) |
-                (np.nanmean(overmin_azi[:,4:6],axis=1) > 20),
+                (np.nanmean(overmin_azi[:,4:6],axis=1) > 18),
                  1, 0
             )
 
@@ -444,22 +386,6 @@ if __name__=="__main__":
                 (azi_stds >  40), 
                 1, 0
             )
-        # Ne, das ist es noch nichts - Foghat sieht in diesem Setup scheiße aus...
-
-
-        '''
-        # Figure Stds by channel:
-        tag = os.path.basename(site_file).split(".")[0]
-        outpath = "/home/aki/PhD_plots/"
-        for i in range(14): 
-            ele_mittel = std_ele_azi[2,:,i]       
-            plt.figure(figsize=(16,9))
-            plt.title("std mean by elevation histogram: "+tag+" Channel: "+str(i+1))
-            plt.hist(ele_mittel.flatten())
-            plt.tight_layout()
-            plt.savefig(outpath+f"obstacle_rfi/rfi_{tag}_{i}.png", dpi=200, bbox_inches="tight")
-            plt.close()
-        '''
 
         ####
         # 2nd create colorplots of stds; overshots and flag

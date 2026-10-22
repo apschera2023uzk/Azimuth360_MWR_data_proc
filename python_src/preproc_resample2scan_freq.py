@@ -45,8 +45,8 @@ def parse_arguments():
         # default=os.path.expanduser("~/PhD_data/scans/joyhat_raw_jun_jul_aug_sep/MWR_1C01_*.nc"),
         # default=os.path.expanduser("~/PhD_data/FESSTVaL_14GB/foghat/l1/*/*/fval_uzk_mwr00_l1_tb*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/aachen_may26/MWR_1C01_aachen_*.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/MWR_1C01_sinthern_*.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/MWR_1C01_vettweiss_*.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/sinthern_may26/MWR_1C01_sinthern_*.nc"),
+        #default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/vettweiss_may26/MWR_1C01_vettweiss_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/airport_may26/*/MWR_1C01_airport_*.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/juelich_may26/sups_joy_mwr00_l1_tb_p00_*.nc"),   
         # default=os.path.expanduser("~/PhD_data/scans/vitII_site_eval/foghat_may26/MWR_1C01_*.nc"),
@@ -58,9 +58,9 @@ def parse_arguments():
         type=str,
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Tophat_202510_12.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_JOYCE_Joyhat_202406_09.nc"),
-        # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
+        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_sinthern_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_airport_may26.nc"),
-        default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
+        #default=os.path.expanduser("~/PhD_data/scans/MWR_scans_vettweiss_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_aachen_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_juelich_may26.nc"),
         # default=os.path.expanduser("~/PhD_data/scans/MWR_scans_foghat_may26.nc"),
@@ -161,7 +161,7 @@ def interpolate_azimuths(ds, ele_var="ele", tb_var="tb"):
     return ds
 
 ###############################################################################
-
+'''
 def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
                           max_elev_azi_diff=max_elev_azi_diff, max_ele=87):
     # Output: list of lists, because each scan is one list of indices!
@@ -207,6 +207,54 @@ def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",\
         ele_old = ds_in[ele_var].values[i]
         azi_old = ds_in[azi_var].values[i]
     
+    return time_indices_list_list, BL_time_indices_list_list
+'''
+def determine_scan_slices(ds_in, ele_var="ele", azi_var="azi",
+                          max_elev_azi_diff=max_elev_azi_diff, max_ele=87,
+                          min_azi_points=30, ele_tol=0.15, azi_tol=1.0,
+                          max_gap=None, verbose=True):
+    """
+    Split time series into azimuth scans (constant elevation, >= min_azi_points
+    distinct azimuths) and BL scans (constant azimuth, varying elevation < max_ele).
+    Output: two lists of lists of time indices (one list per scan).
+    max_gap: optional np.timedelta64; a time gap larger than this always starts a new scan.
+    """
+    ele = ds_in[ele_var].values.astype(float)
+    azi = ds_in[azi_var].values.astype(float)
+    t   = ds_in["time"].values
+    n   = len(ele)
+    idx = np.arange(n)
+
+    valid = np.isfinite(ele) & np.isfinite(azi) & (ele >= 0) & (ele <= 180)
+    low   = valid & (ele < max_ele)
+    gap   = (np.diff(t) > max_gap) if max_gap is not None else np.zeros(n - 1, bool)
+
+    # --- 1) Azimuth scans: runs of (nearly) constant low elevation ---
+    brk = np.ones(n, bool)
+    brk[1:] = (low[1:] != low[:-1]) | (np.abs(np.diff(ele)) > ele_tol) | gap
+    segments = np.split(idx, np.flatnonzero(brk)[1:])
+
+    time_indices_list_list = []
+    in_azi = np.zeros(n, bool)
+    for seg in segments:
+        if not low[seg[0]]:
+            continue
+        n_azi_unique = len(np.unique(np.round(azi[seg]) % 360))
+        if len(seg) >= min_azi_points and n_azi_unique >= min_azi_points:
+            time_indices_list_list.append(seg.tolist())
+            in_azi[seg] = True
+
+    # --- 2) BL scans: remaining low samples, runs of constant azimuth ---
+    bl = low & ~in_azi
+    dazi = np.abs((np.diff(azi) + 180) % 360 - 180)          # wrap-safe azimuth difference
+    brk = np.ones(n, bool)
+    brk[1:] = (bl[1:] != bl[:-1]) | (dazi > azi_tol) | gap
+    segments = np.split(idx, np.flatnonzero(brk)[1:])
+    BL_time_indices_list_list = [seg.tolist() for seg in segments if bl[seg[0]]]
+
+    if verbose:
+        eles = [round(float(np.nanmedian(ele[s])), 1) for s in time_indices_list_list]
+
     return time_indices_list_list, BL_time_indices_list_list
 
 ###############################################################################
